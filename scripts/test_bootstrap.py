@@ -21,6 +21,7 @@ HOST_CONFIG = ROOT / 'scripts/bootstrap/lib/host-config.sh'
 PATH_FACTS = ROOT / 'scripts/bootstrap/lib/path-facts.sh'
 EXEC_SAFETY = ROOT / 'scripts/bootstrap/lib/exec-safety.sh'
 ARCHIVE_LIB = ROOT / 'scripts/bootstrap/lib/archive.sh'
+KUBECTL_LIB = ROOT / 'scripts/bootstrap/lib/kubectl.sh'
 CIDR_CHECK = ROOT / 'scripts/bootstrap/check_cidrs.py'
 PREFLIGHT = ROOT / 'scripts/bootstrap/00-preflight.sh'
 STAGE_ARTIFACTS = ROOT / 'scripts/bootstrap/10-stage-artifacts.sh'
@@ -1430,6 +1431,75 @@ class ArchiveLibraryTest(BootstrapTestCase):
                 # 10 私有的两个包装随并集吸收，不得留下孤儿定义。
                 self.assertNotIn('require_archive_member()', body)
                 self.assertNotIn('require_regular_archive_member()', body)
+
+
+class KubectlLibraryTest(BootstrapTestCase):
+    """lib/kubectl.sh：stage 60/90 曾各留一份的 admin.conf 生命周期与 kubectl 门禁。
+
+    两份实现归一命名后字节一致，唯一差异是 60 把 safe_file 的四项检查内联展开
+    （账本 Task 5 裁决）。统一取 90 的命名与抽取形态。
+    """
+
+    STAGES = (INSTALL_CILIUM, FINAL_VERIFY)
+    DECLARATIONS = (
+        'admin_conf_metadata_is_safe()',
+        'capture_admin_conf()',
+        'admin_conf_is_safe()',
+        'kubectl_run()',
+        'kubectl_query_is_empty()',
+    )
+
+    def test_both_consuming_stages_delegate_to_the_shared_library(self) -> None:
+        """60/90 必须只 source 共享库，且不得残留旧的 _gate 命名。"""
+        self.assertTrue(KUBECTL_LIB.is_file(), 'lib/kubectl.sh is missing')
+        self.assertFalse(KUBECTL_LIB.is_symlink())
+        self.assertEqual(KUBECTL_LIB.stat().st_mode & 0o022, 0)
+
+        shared = KUBECTL_LIB.read_text(encoding='utf-8')
+        for declaration in self.DECLARATIONS:
+            self.assertEqual(shared.count(declaration), 1, declaration)
+        # 跨 lib 依赖：safe_file 来自 exec-safety.sh，admin_conf_json_is_exact 来自
+        # admin-conf.sh；只 source 本库的消费者不能拿到半个依赖。
+        self.assertIn('/exec-safety.sh"', shared)
+        self.assertIn('/admin-conf.sh"', shared)
+
+        source_line = 'source "${script_dir}/lib/kubectl.sh"'
+        for stage in self.STAGES:
+            with self.subTest(stage=stage.name):
+                body = stage.read_text(encoding='utf-8')
+                self.assertIn(source_line, body)
+                for declaration in self.DECLARATIONS:
+                    self.assertNotIn(declaration, body, declaration)
+                # 旧命名一处都不许留：60 曾用 _gate 后缀，改名不彻底会让调用点
+                # 指向不存在的函数，而 set -u 之外的 command not found 只在真正
+                # 执行到那条路径时才暴露。
+                self.assertNotIn('admin_conf_gate', body)
+                self.assertNotIn('admin_conf_metadata_gate', body)
+
+    def test_capture_state_lives_only_in_the_shared_library(self) -> None:
+        """捕获状态必须只有一份，stage 各留一份会让 TOCTOU 判定各自为政。"""
+        # 按整行匹配：函数体内的 ADMIN_CONF_CONTENT=$captured 是赋值不是声明。
+        shared = KUBECTL_LIB.read_text(encoding='utf-8').splitlines()
+        for name in ('ADMIN_CONF_CAPTURED=0', 'ADMIN_CONF_CONTENT='):
+            self.assertEqual(shared.count(name), 1, name)
+        for stage in self.STAGES:
+            with self.subTest(stage=stage.name):
+                body = stage.read_text(encoding='utf-8')
+                self.assertNotIn('ADMIN_CONF_CAPTURED=0', body)
+                self.assertNotIn('\nADMIN_CONF_CONTENT=\n', body)
+
+    def test_kubectl_never_reads_the_kubeconfig_from_disk(self) -> None:
+        """kubectl 一律读已捕获内容，且调用前后各校验一次磁盘文件。
+
+        直接把磁盘路径交给 kubectl，读取期间文件被替换不会被发现；这条断言钉住
+        TOCTOU 防护的三个要件，任何一件被拿掉都判红。
+        """
+        shared = KUBECTL_LIB.read_text(encoding='utf-8')
+        run_body = shared.split('kubectl_run() {', 1)[1].split('\n}\n', 1)[0]
+
+        self.assertIn('--kubeconfig <(printf', run_body)
+        self.assertNotIn('--kubeconfig "$admin_conf"', run_body)
+        self.assertEqual(run_body.count('admin_conf_is_safe || return 1'), 2)
 
 
 class CidrCheckTest(BootstrapTestCase):
@@ -11154,7 +11224,7 @@ operator:
                 ;;
               values.yaml)
                 key=values
-                digest=5f598e99c515d0ccca7efdd6069ea515142615520a02e6c4e0b5cba1bf011d8a
+                digest=5f598e99defc07a32a1b944ad749baf0e66b2b2437dbe0ab995c323f71cdd887
                 ;;
               *) exec /usr/bin/shasum -a 256 "$path" ;;
             esac

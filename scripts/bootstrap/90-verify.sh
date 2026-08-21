@@ -47,6 +47,8 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck disable=SC1091
 source "${script_dir}/lib/admin-conf.sh"
 # shellcheck disable=SC1091
+source "${script_dir}/lib/kubectl.sh"
+# shellcheck disable=SC1091
 source "${script_dir}/lib/common.sh"
 # shellcheck disable=SC1091
 source "${script_dir}/lib/path-facts.sh"
@@ -204,48 +206,6 @@ cni_payload_is_exact() {
     ownership=$(dpkg-query -S "/opt/cni/bin/${name}" 2>/dev/null) || return 1
     [[ "$ownership" == "kubernetes-cni: /opt/cni/bin/${name}" ]] || return 1
   done < <(cni_manifest)
-}
-
-admin_conf_metadata_is_safe() {
-  safe_file "$admin_conf" 600
-}
-
-ADMIN_CONF_CAPTURED=0
-ADMIN_CONF_CONTENT=
-
-capture_admin_conf() {
-  local captured output with_sentinel
-  admin_conf_metadata_is_safe || return 1
-  with_sentinel=$(/bin/cat -- "$admin_conf"; printf x) || return 1
-  [[ "${with_sentinel: -1}" == x ]] || return 1
-  captured=${with_sentinel%?}
-  cmp -s "$admin_conf" <(printf '%s' "$captured") || return 1
-  output=$(
-    PYTHONDONTWRITEBYTECODE=1 KUBECTL_KUBERC=false "$kubectl_binary" \
-      --kubeconfig <(printf '%s' "$captured") --cache-dir=/dev/null \
-      config view --raw --merge=false --output=json 2>/dev/null
-  ) || return 1
-  printf '%s' "$output" | admin_conf_json_is_exact || return 1
-  admin_conf_metadata_is_safe || return 1
-  cmp -s "$admin_conf" <(printf '%s' "$captured") || return 1
-  ADMIN_CONF_CONTENT=$captured
-  ADMIN_CONF_CAPTURED=1
-}
-
-admin_conf_is_safe() {
-  [[ "$ADMIN_CONF_CAPTURED" == 1 ]] || return 1
-  admin_conf_metadata_is_safe || return 1
-  cmp -s "$admin_conf" <(printf '%s' "$ADMIN_CONF_CONTENT")
-}
-
-kubectl_run() {
-  local exit_code=0
-  admin_conf_is_safe || return 1
-  PYTHONDONTWRITEBYTECODE=1 KUBECTL_KUBERC=false "$kubectl_binary" \
-    --kubeconfig <(printf '%s' "$ADMIN_CONF_CONTENT") \
-    --cache-dir=/dev/null "$@" || exit_code=$?
-  admin_conf_is_safe || return 1
-  return "$exit_code"
 }
 
 helm_run() {
@@ -429,16 +389,6 @@ api_is_exact_and_ready() {
   [[ "$output" == "https://${HOST_NODE_IP}:6443" ]] || return 1
   output=$(kubectl_run get --raw=/readyz 2>/dev/null) || return 1
   [[ "$output" == ok ]]
-}
-
-kubectl_query_is_empty() {
-  local captured
-  captured=$(
-    set +e
-    kubectl_run "$@" 2>/dev/null
-    printf '__EXIT_CODE__=%s\n' "$?"
-  )
-  [[ "$captured" == '__EXIT_CODE__=0' ]]
 }
 
 kube_proxy_is_absent() {
@@ -1019,11 +969,15 @@ staged_root=$(host_path "$STAGED_ROOT")
 helm_archive="${staged_root}/${HELM_ARCHIVE_NAME}"
 gateway_manifest="${staged_root}/${GATEWAY_MANIFEST_NAME}"
 kubeadm_binary=$(host_path /usr/bin/kubeadm)
+# 由 lib/kubectl.sh 消费（source 路径含变量，shellcheck 无法跟随，故显式关闭）。
+# shellcheck disable=SC2034
 kubectl_binary=$(host_path /usr/bin/kubectl)
 kubelet_binary=$(host_path /usr/bin/kubelet)
 crictl_binary=$(host_path /usr/local/bin/crictl)
 helm_binary=$(host_path /usr/local/bin/helm)
 openssl_binary=$(host_path /usr/bin/openssl)
+# 由 lib/kubectl.sh 消费（source 路径含变量，shellcheck 无法跟随，故显式关闭）。
+# shellcheck disable=SC2034
 admin_conf=$(host_path /etc/kubernetes/admin.conf)
 cni_root=$(host_path /opt/cni/bin)
 

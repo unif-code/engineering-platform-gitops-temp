@@ -54,6 +54,8 @@ source "${script_dir}/lib/host-config.sh"
 # shellcheck disable=SC1091
 source "${script_dir}/lib/admin-conf.sh"
 # shellcheck disable=SC1091
+source "${script_dir}/lib/kubectl.sh"
+# shellcheck disable=SC1091
 source "${script_dir}/lib/dpkg-package-verification.sh"
 
 # PHASE 由公共 evidence helper 间接读取。
@@ -180,49 +182,6 @@ managed_kubectl_gate() {
   dpkg_package_verification_is_exact kubectl
 }
 
-admin_conf_metadata_gate() {
-  [[ -f "$admin_conf" && ! -L "$admin_conf" && "$(path_mode "$admin_conf")" == 600 ]] &&
-    owned_by_expected "$admin_conf"
-}
-
-ADMIN_CONF_CAPTURED=0
-ADMIN_CONF_CONTENT=
-
-capture_admin_conf() {
-  local captured output with_sentinel
-  admin_conf_metadata_gate || return 1
-  with_sentinel=$(/bin/cat -- "$admin_conf"; printf x) || return 1
-  [[ "${with_sentinel: -1}" == x ]] || return 1
-  captured=${with_sentinel%?}
-  cmp -s "$admin_conf" <(printf '%s' "$captured") || return 1
-  output=$(
-    PYTHONDONTWRITEBYTECODE=1 KUBECTL_KUBERC=false "$kubectl_binary" \
-      --kubeconfig <(printf '%s' "$captured") --cache-dir=/dev/null \
-      config view --raw --merge=false --output=json 2>/dev/null
-  ) || return 1
-  printf '%s' "$output" | admin_conf_json_is_exact || return 1
-  admin_conf_metadata_gate || return 1
-  cmp -s "$admin_conf" <(printf '%s' "$captured") || return 1
-  ADMIN_CONF_CONTENT=$captured
-  ADMIN_CONF_CAPTURED=1
-}
-
-admin_conf_gate() {
-  [[ "$ADMIN_CONF_CAPTURED" == 1 ]] || return 1
-  admin_conf_metadata_gate || return 1
-  cmp -s "$admin_conf" <(printf '%s' "$ADMIN_CONF_CONTENT")
-}
-
-kubectl_run() {
-  local exit_code=0
-  admin_conf_gate || return 1
-  PYTHONDONTWRITEBYTECODE=1 KUBECTL_KUBERC=false "$kubectl_binary" \
-    --kubeconfig <(printf '%s' "$ADMIN_CONF_CONTENT") \
-    --cache-dir=/dev/null "$@" || exit_code=$?
-  admin_conf_gate || return 1
-  return "$exit_code"
-}
-
 helm_run() {
   PYTHONDONTWRITEBYTECODE=1 KUBECACHEDIR=/dev/null "$helm_binary" "$@"
 }
@@ -233,10 +192,10 @@ helm_kubeconfig_dir=
 # helm 3.21 无法从进程替换的管道读取 kubeconfig（client-go 会多次加载，第二次
 # 读到空配置后回退到 localhost:8080）。因此把已校验的内存内容写入 /root 下的私有
 # 临时文件（0700 目录、0600 文件，umask 077 保证），按路径传给 helm，用完即删。
-# helm 仍只消费校验过的字节；前后的 admin_conf_gate 照旧检测磁盘文件竞态。
+# helm 仍只消费校验过的字节；前后的 admin_conf_is_safe 照旧检测磁盘文件竞态。
 helm_cluster_run() {
   local exit_code=0 parent kubeconfig_dir kubeconfig
-  admin_conf_gate || return 1
+  admin_conf_is_safe || return 1
   parent=$(host_path /root)
   safe_directory "$parent" 700 || return 1
   kubeconfig_dir=$(mktemp -d "${parent}/.helm-kubeconfig.XXXXXX") || return 1
@@ -261,7 +220,7 @@ helm_cluster_run() {
   rm -f -- "$kubeconfig" || return 1
   rmdir -- "$kubeconfig_dir" || return 1
   helm_kubeconfig_dir=
-  admin_conf_gate || return 1
+  admin_conf_is_safe || return 1
   return "$exit_code"
 }
 
@@ -1153,6 +1112,8 @@ fi
 readonly post_install_timeout post_install_interval
 kubectl_binary=$(host_path /usr/bin/kubectl)
 helm_binary=$(host_path /usr/local/bin/helm)
+# 由 lib/kubectl.sh 消费（source 路径含变量，shellcheck 无法跟随，故显式关闭）。
+# shellcheck disable=SC2034
 admin_conf=$(host_path /etc/kubernetes/admin.conf)
 helm_archive_input=$helm_archive
 gateway_manifest_input=$gateway_manifest
@@ -1202,14 +1163,14 @@ apply_snapshot_gate || complete STOP_SUPPLY_CHAIN_MISMATCH apply-input-snapshot-
 helm_state=$(helm_binary_state)
 [[ "$helm_state" == COMPLIANT ]] || complete STOP_UNKNOWN_STATE helm-binary-verification-failed "$EXIT_UNKNOWN_STATE" NONE
 managed_kubectl_gate || complete STOP_UNKNOWN_STATE kubectl-provenance-raced "$EXIT_UNKNOWN_STATE" NONE
-admin_conf_gate || complete STOP_UNKNOWN_STATE admin-conf-metadata-raced "$EXIT_UNKNOWN_STATE" NONE
+admin_conf_is_safe || complete STOP_UNKNOWN_STATE admin-conf-metadata-raced "$EXIT_UNKNOWN_STATE" NONE
 api_endpoint_is_exact || complete STOP_UNKNOWN_STATE api-endpoint-raced "$EXIT_UNKNOWN_STATE" NONE
 load_cluster_state "$helm_state"
 [[ "$CLUSTER_STATE" == APPLY_REQUIRED ]] || complete STOP_UNKNOWN_STATE pre-gateway-cluster-state-raced "$EXIT_UNKNOWN_STATE" NONE
 
 if [[ "$GATEWAY_STATE" == MISSING ]]; then
   managed_kubectl_gate || complete STOP_UNKNOWN_STATE kubectl-raced-before-gateway "$EXIT_UNKNOWN_STATE" NONE
-  admin_conf_gate || complete STOP_UNKNOWN_STATE admin-conf-raced-before-gateway "$EXIT_UNKNOWN_STATE" NONE
+  admin_conf_is_safe || complete STOP_UNKNOWN_STATE admin-conf-raced-before-gateway "$EXIT_UNKNOWN_STATE" NONE
   api_endpoint_is_exact || complete STOP_UNKNOWN_STATE api-endpoint-raced-before-gateway "$EXIT_UNKNOWN_STATE" NONE
   staged_inputs_gate || complete STOP_SUPPLY_CHAIN_MISMATCH staged-input-raced-at-gateway "$EXIT_SUPPLY_CHAIN" NONE
   apply_snapshot_gate || complete STOP_SUPPLY_CHAIN_MISMATCH apply-input-snapshot-raced-at-gateway "$EXIT_SUPPLY_CHAIN" NONE
@@ -1222,7 +1183,7 @@ if [[ "$GATEWAY_STATE" == MISSING ]]; then
   staged_inputs_gate || complete STOP_SUPPLY_CHAIN_MISMATCH staged-input-raced-after-gateway "$EXIT_SUPPLY_CHAIN" NONE
   apply_snapshot_gate || complete STOP_SUPPLY_CHAIN_MISMATCH apply-input-snapshot-raced-after-gateway "$EXIT_SUPPLY_CHAIN" NONE
   managed_kubectl_gate || complete STOP_UNKNOWN_STATE kubectl-raced-after-gateway "$EXIT_UNKNOWN_STATE" NONE
-  admin_conf_gate || complete STOP_UNKNOWN_STATE admin-conf-raced-after-gateway "$EXIT_UNKNOWN_STATE" NONE
+  admin_conf_is_safe || complete STOP_UNKNOWN_STATE admin-conf-raced-after-gateway "$EXIT_UNKNOWN_STATE" NONE
   api_endpoint_is_exact || complete STOP_UNKNOWN_STATE api-endpoint-raced-after-gateway "$EXIT_UNKNOWN_STATE" NONE
   load_cluster_state "$helm_state"
   [[ "$CLUSTER_STATE" == APPLY_REQUIRED && "$GATEWAY_STATE" == COMPLIANT ]] ||
@@ -1232,7 +1193,7 @@ fi
 staged_inputs_gate || complete STOP_SUPPLY_CHAIN_MISMATCH staged-input-raced-before-helm "$EXIT_SUPPLY_CHAIN" NONE
 apply_snapshot_gate || complete STOP_SUPPLY_CHAIN_MISMATCH apply-input-snapshot-raced-before-helm "$EXIT_SUPPLY_CHAIN" NONE
 managed_kubectl_gate || complete STOP_UNKNOWN_STATE kubectl-raced-before-helm "$EXIT_UNKNOWN_STATE" NONE
-admin_conf_gate || complete STOP_UNKNOWN_STATE admin-conf-raced-before-helm "$EXIT_UNKNOWN_STATE" NONE
+admin_conf_is_safe || complete STOP_UNKNOWN_STATE admin-conf-raced-before-helm "$EXIT_UNKNOWN_STATE" NONE
 api_endpoint_is_exact || complete STOP_UNKNOWN_STATE api-endpoint-raced-before-helm "$EXIT_UNKNOWN_STATE" NONE
 kube_proxy_absent || complete STOP_UNKNOWN_STATE kube-proxy-state-raced "$EXIT_UNKNOWN_STATE" NONE
 helm_state=$(helm_binary_state)
@@ -1256,7 +1217,7 @@ fi
 staged_inputs_gate || complete STOP_SUPPLY_CHAIN_MISMATCH staged-input-raced-after-helm "$EXIT_SUPPLY_CHAIN" NONE
 apply_snapshot_gate || complete STOP_SUPPLY_CHAIN_MISMATCH apply-input-snapshot-raced-after-helm "$EXIT_SUPPLY_CHAIN" NONE
 managed_kubectl_gate || complete STOP_VERIFY_FAILED kubectl-post-install-drift "$EXIT_VERIFY_FAILED" NONE
-admin_conf_gate || complete STOP_VERIFY_FAILED admin-conf-post-install-drift "$EXIT_VERIFY_FAILED" NONE
+admin_conf_is_safe || complete STOP_VERIFY_FAILED admin-conf-post-install-drift "$EXIT_VERIFY_FAILED" NONE
 api_endpoint_is_exact || complete STOP_VERIFY_FAILED api-endpoint-post-install-drift "$EXIT_VERIFY_FAILED" NONE
 helm_state=$(helm_binary_state)
 [[ "$helm_state" == COMPLIANT ]] || complete STOP_VERIFY_FAILED helm-post-install-drift "$EXIT_VERIFY_FAILED" NONE

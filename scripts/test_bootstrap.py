@@ -1494,6 +1494,48 @@ class ArchiveLibraryTest(BootstrapTestCase):
             'REGULAR_MEMBER_ACCEPTED\n',
         )
 
+    def test_helm_member_must_be_a_regular_file(self) -> None:
+        """helm 族的成员类型检查与另外两族一致。
+
+        合并 validate_archive 时 helm 被排除在外，因为当时没有该归档成员类型的实测
+        证据，而全局约束禁止依据 fixture 裁决语义差异。2026-08-21 服务器实测
+        `tar -tvzf helm-v3.21.0-linux-amd64.tar.gz linux-amd64/helm` 输出
+        `-rwxr-xr-x runner/runner 57856184 ... linux-amd64/helm`——单行、`-` 开头，
+        确认是正规文件，缺口补上。
+
+        对照组不可省：实现缺席时「拒绝」分支会因为归档本就不合法而照样绿。
+        """
+        directory = self.temporary_directory()
+        as_symlink = self.write_archive(
+            directory / 'helm-member-symlink.tgz',
+            [
+                ('file', 'linux-amd64/LICENSE', 'license\n'),
+                ('symlink', 'linux-amd64/helm', 'LICENSE'),
+            ],
+        )
+        as_directory = self.write_archive(
+            directory / 'helm-member-directory.tgz',
+            [('dir', 'linux-amd64/helm', '')],
+        )
+        regular = self.write_archive(
+            directory / 'helm-member-regular.tgz',
+            [('file', 'linux-amd64/helm', 'helm\n')],
+        )
+
+        result = self.run_archive(
+            'validate_archive helm "$1" || echo SYMLINK_MEMBER_REJECTED\n'
+            'validate_archive helm "$2" || echo DIRECTORY_MEMBER_REJECTED\n'
+            'validate_archive helm "$3" && echo REGULAR_MEMBER_ACCEPTED\n',
+            str(as_symlink), str(as_directory), str(regular),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            'SYMLINK_MEMBER_REJECTED\nDIRECTORY_MEMBER_REJECTED\n'
+            'REGULAR_MEMBER_ACCEPTED\n',
+        )
+
     def test_every_family_keeps_its_required_members(self) -> None:
         """三个族都必须保留：合并若丢掉 helm，它会落进 `*)` 而被判否。"""
         directory = self.temporary_directory()

@@ -5,9 +5,12 @@
 #   整整一类逃逸。GNU tar 与 bsdtar 对硬链接都输出 `h` 前缀加 ' link to '（实测）。
 # - 未知族 fail-closed；原先 10 的 case 没有 `*)` 分支，未知名会静默通过。两个调用点
 #   今天都只传 containerd/crictl/helm，因此这是加强而非行为变更。
-# - 期望成员必须是正规文件：containerd 取自 30、crictl 两边都有。
-#   helm 保留 10 的"仅要求成员存在"——没有任何实现对 helm 做过正规文件检查，加上去是
-#   新语义而非并集，而仓库内没有 helm 归档成员类型的实测证据（见账本 R13）。
+# - 期望成员必须是正规文件：三个族都受检。containerd 取自 30、crictl 两边都有；
+#   helm 原先保留 10 的"仅要求成员存在"，因为合并时没有该归档成员类型的实测证据，
+#   而全局约束禁止依据 fixture 裁决语义差异（账本 R13）。2026-08-21 在服务器上实测
+#   `tar -tvzf helm-v3.21.0-linux-amd64.tar.gz linux-amd64/helm` 得到
+#   `-rwxr-xr-x runner/runner 57856184 ... linux-amd64/helm`——单行且以 `-` 开头，
+#   确认是正规文件，缺口就此补上：三个族的成员类型检查现在一致。
 # - approved_record 取 30，含 BOOTSTRAP_TEST_APPROVED_LOCK_FILE 测试缝；生产环境由各
 #   stage 入口的 "${!BOOTSTRAP_TEST_@}" 前缀通配守卫拦下。
 
@@ -103,7 +106,7 @@ validate_archive() {
       ;;
     helm)
       expected_members=(linux-amd64/helm)
-      regular_required=0
+      regular_required=1
       ;;
     *)
       return 1

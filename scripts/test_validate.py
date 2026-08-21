@@ -169,7 +169,7 @@ class RepositoryProfileContractTest(unittest.TestCase):
             ),
             'stage-50-success-alternatives': (
                 'runbook',
-                r'\| 12 \| `50-kubeadm-init\.sh` \| `--check` 后批准 '
+                r'\| 12 \| `stages/50-kubeadm-init/run\.sh` \| `--check` 后批准 '
                 r'`--apply` \| `PASS_KUBEADM_INITIALIZED` 或 '
                 r'`ALREADY_COMPLIANT` \|',
             ),

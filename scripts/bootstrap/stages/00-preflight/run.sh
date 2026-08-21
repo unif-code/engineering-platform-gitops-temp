@@ -179,4 +179,4 @@ log_evidence "POD_CIDR=${HOST_POD_CIDR}"
 log_evidence "CIDR_SCOPE=SERVER_LOCAL_SCOPE_ONLY"
 log_evidence "REPO_ROOT=${repo_root}"
 
-complete PASS_PREFLIGHT server-local-preflight-passed 0 '10-stage-artifacts.sh --check'
+complete PASS_PREFLIGHT server-local-preflight-passed 0 'stages/10-stage-artifacts/run.sh --check'

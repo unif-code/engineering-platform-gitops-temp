@@ -35,24 +35,27 @@ else
 fi
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# run.sh 比原来的平铺位置深两层；lib/、check_cidrs.py 与其它 stage 都以
+# bootstrap_dir 为锚点。
+bootstrap_dir=$(cd "${script_dir}/../.." && pwd -P)
 # shellcheck disable=SC1091
-source "${script_dir}/lib/common.sh"
+source "${bootstrap_dir}/lib/common.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/path-facts.sh"
+source "${bootstrap_dir}/lib/path-facts.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/host-config.sh"
+source "${bootstrap_dir}/lib/host-config.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/exec-safety.sh"
+source "${bootstrap_dir}/lib/exec-safety.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/admin-conf.sh"
+source "${bootstrap_dir}/lib/admin-conf.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/kubectl.sh"
+source "${bootstrap_dir}/lib/kubectl.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/dpkg-package-verification.sh"
+source "${bootstrap_dir}/lib/dpkg-package-verification.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/kubelet-default.sh"
+source "${bootstrap_dir}/lib/kubelet-default.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/os-release.sh"
+source "${bootstrap_dir}/lib/os-release.sh"
 
 # PHASE 由公共 evidence helper 间接读取。
 # shellcheck disable=SC2034
@@ -63,7 +66,7 @@ readonly PYTHON_BINARY=/usr/bin/python3
 readonly KUBELET_KEEP_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 readonly KERNEL_TRANSCRIPT=$'PHASE=prepare-kernel\nMODE=CHECK\nRESULT=ALREADY_COMPLIANT\nREASON=kernel-ready\nEVIDENCE=NONE\nEXIT_CODE=0\nNEXT=30-install-containerd\nSHA256=NONE'
 readonly CONTAINERD_TRANSCRIPT=$'PHASE=containerd\nMODE=CHECK\nRESULT=ALREADY_COMPLIANT\nREASON=containerd-ready\nEVIDENCE=NONE\nEXIT_CODE=0\nNEXT=40-install-kubernetes\nSHA256=NONE'
-readonly KUBERNETES_TRANSCRIPT=$'PHASE=install-kubernetes\nMODE=CHECK\nRESULT=ALREADY_COMPLIANT\nREASON=kubernetes-packages-ready\nEVIDENCE=NONE\nEXIT_CODE=0\nNEXT=50-kubeadm-init.sh --check\nSHA256=NONE'
+readonly KUBERNETES_TRANSCRIPT=$'PHASE=install-kubernetes\nMODE=CHECK\nRESULT=ALREADY_COMPLIANT\nREASON=kubernetes-packages-ready\nEVIDENCE=NONE\nEXIT_CODE=0\nNEXT=stages/50-kubeadm-init/run.sh --check\nSHA256=NONE'
 
 safe_test_gate() {
   local path=$1
@@ -532,10 +535,10 @@ CONFIG_SHA256=$(host_pin kubeadm-init.yaml) ||
 readonly CONFIG_SHA256
 readonly CONFIG_FILE="${HOST_CONFIG_DIR}/kubeadm-init.yaml"
 
-kernel_script="${script_dir}/stages/20-prepare-kernel/run.sh"
-containerd_script="${script_dir}/stages/30-install-containerd/run.sh"
-kubernetes_script="${script_dir}/40-install-kubernetes.sh"
-cidr_script="${script_dir}/check_cidrs.py"
+kernel_script="${bootstrap_dir}/stages/20-prepare-kernel/run.sh"
+containerd_script="${bootstrap_dir}/stages/30-install-containerd/run.sh"
+kubernetes_script="${bootstrap_dir}/stages/40-install-kubernetes/run.sh"
+cidr_script="${bootstrap_dir}/check_cidrs.py"
 config_source=$CONFIG_FILE
 kubeadm_binary=$(host_path /usr/bin/kubeadm)
 kubectl_binary=$(host_path /usr/bin/kubectl)
@@ -572,7 +575,7 @@ esac
 # MODE 由公共 parse_mode helper 赋值。
 # shellcheck disable=SC2153
 if [[ "$MODE" == CHECK ]]; then
-  complete PASS_KUBEADM_CHECK apply-required 0 '50-kubeadm-init.sh --apply'
+  complete PASS_KUBEADM_CHECK apply-required 0 'stages/50-kubeadm-init/run.sh --apply'
 fi
 
 trap cleanup_config_snapshot EXIT

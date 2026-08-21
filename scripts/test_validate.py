@@ -289,9 +289,9 @@ class RepositoryProfileContractTest(unittest.TestCase):
                 '下表不是诊断和人工应急入口，而是正常 bootstrap 路径',
             ),
             'stage-50-success-alternatives': (
-                '| 12 | `50-kubeadm-init.sh` | `--check` 后批准 `--apply` | '
+                '| 12 | `stages/50-kubeadm-init/run.sh` | `--check` 后批准 `--apply` | '
                 '`PASS_KUBEADM_INITIALIZED` 或 `ALREADY_COMPLIANT` |',
-                '| 12 | `50-kubeadm-init.sh` | `--check` 后批准 `--apply` | '
+                '| 12 | `stages/50-kubeadm-init/run.sh` | `--check` 后批准 `--apply` | '
                 '不是 `PASS_KUBEADM_INITIALIZED` 或 `ALREADY_COMPLIANT` |',
             ),
         }

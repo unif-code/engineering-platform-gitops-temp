@@ -35,16 +35,19 @@ else
 fi
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# run.sh 比原来的平铺位置深两层；lib/、check_cidrs.py 与其它 stage 都以
+# bootstrap_dir 为锚点。
+bootstrap_dir=$(cd "${script_dir}/../.." && pwd -P)
 # shellcheck disable=SC1091
-source "${script_dir}/lib/common.sh"
+source "${bootstrap_dir}/lib/common.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/path-facts.sh"
+source "${bootstrap_dir}/lib/path-facts.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/cni-manifest.sh"
+source "${bootstrap_dir}/lib/cni-manifest.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/dpkg-package-verification.sh"
+source "${bootstrap_dir}/lib/dpkg-package-verification.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/kubelet-default.sh"
+source "${bootstrap_dir}/lib/kubelet-default.sh"
 
 # PHASE 由公共 evidence helper 间接读取。
 # shellcheck disable=SC2034
@@ -711,7 +714,7 @@ complete_successful_kubernetes_install() {
   log_evidence PACKAGE_HOLD=kubeadm,kubectl,kubelet,kubernetes-cni
   log_evidence CNI_FILE_COUNT=20
   log_evidence CNI_OWNERSHIP=kubernetes-cni
-  complete PASS_KUBERNETES_INSTALLED kubernetes-packages-ready 0 '50-kubeadm-init.sh --check'
+  complete PASS_KUBERNETES_INSTALLED kubernetes-packages-ready 0 'stages/50-kubeadm-init/run.sh --check'
 }
 
 apt_workspace=
@@ -910,13 +913,13 @@ else
   kubelet_state=$(kubelet_unit_state)
   case "$kubelet_state" in
     READY)
-      complete ALREADY_COMPLIANT kubernetes-packages-ready 0 '50-kubeadm-init.sh --check'
+      complete ALREADY_COMPLIANT kubernetes-packages-ready 0 'stages/50-kubeadm-init/run.sh --check'
       ;;
     START_REQUIRED)
       # MODE 由公共 parse_mode helper 赋值。
       # shellcheck disable=SC2153
       if [[ "$MODE" == CHECK ]]; then
-        complete PASS_KUBERNETES_CHECK apply-required 0 '40-install-kubernetes.sh --apply'
+        complete PASS_KUBERNETES_CHECK apply-required 0 'stages/40-install-kubernetes/run.sh --apply'
       fi
       restart_result=0
       restart_kubelet_and_verify || restart_result=$?
@@ -938,7 +941,7 @@ fi
 # MODE 由公共 parse_mode helper 赋值。
 # shellcheck disable=SC2153
 if [[ "$MODE" == CHECK ]]; then
-  complete PASS_KUBERNETES_CHECK apply-required 0 '40-install-kubernetes.sh --apply'
+  complete PASS_KUBERNETES_CHECK apply-required 0 'stages/40-install-kubernetes/run.sh --apply'
 fi
 
 if [[ "$source_contract" == MISSING ]]; then

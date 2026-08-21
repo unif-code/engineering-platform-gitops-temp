@@ -95,8 +95,8 @@ orchestrator，它必须依据各 stage 的检查结果跳过这些已完成 sta
 | 08 | `stages/10-stage-artifacts/run.sh` | `--check` 后批准 `--apply` | `PASS_ARTIFACTS_STAGED` 或 `ALREADY_COMPLIANT` | 终端回执及 `/root/dev-infra-artifacts/pcs-2026-08-10.1` 摘要清单 |
 | 09 | `stages/20-prepare-kernel/run.sh` | `--check` 后批准 `--apply` | `PASS_KERNEL_PREPARED` 或 `ALREADY_COMPLIANT` | `/root/dev-infra-evidence/09-prepare-kernel-*.txt` |
 | 10 | `stages/30-install-containerd/run.sh` | `--check` 后批准 `--apply` | `PASS_CONTAINERD_INSTALLED` 或 `ALREADY_COMPLIANT` | `/root/dev-infra-evidence/10-containerd-*.txt` |
-| 11 | `40-install-kubernetes.sh` | `--check` 后批准 `--apply` | `PASS_KUBERNETES_INSTALLED` 或 `ALREADY_COMPLIANT` | `/root/dev-infra-evidence/11-kubernetes-*.txt` |
-| 12 | `50-kubeadm-init.sh` | `--check` 后批准 `--apply` | `PASS_KUBEADM_INITIALIZED` 或 `ALREADY_COMPLIANT` | `/root/dev-infra-evidence/12-kubeadm-*.txt` |
+| 11 | `stages/40-install-kubernetes/run.sh` | `--check` 后批准 `--apply` | `PASS_KUBERNETES_INSTALLED` 或 `ALREADY_COMPLIANT` | `/root/dev-infra-evidence/11-kubernetes-*.txt` |
+| 12 | `stages/50-kubeadm-init/run.sh` | `--check` 后批准 `--apply` | `PASS_KUBEADM_INITIALIZED` 或 `ALREADY_COMPLIANT` | `/root/dev-infra-evidence/12-kubeadm-*.txt` |
 | 13 | `60-install-cilium.sh` | `--check` 后批准 `--apply` | `PASS_CILIUM_INSTALLED` 或 `ALREADY_COMPLIANT` | `/root/dev-infra-evidence/13-cilium-*.txt` |
 | 14 | `90-verify.sh` | 仅 `--check` | `PASS_BOOTSTRAP_VERIFIED` | `/root/dev-infra-evidence/14-verify-*.txt` |
 

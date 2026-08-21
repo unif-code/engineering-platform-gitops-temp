@@ -32,8 +32,8 @@ STAGE_SCRIPTS = {
     '10': 'scripts/bootstrap/stages/10-stage-artifacts/run.sh',
     '20': 'scripts/bootstrap/stages/20-prepare-kernel/run.sh',
     '30': 'scripts/bootstrap/stages/30-install-containerd/run.sh',
-    '40': 'scripts/bootstrap/40-install-kubernetes.sh',
-    '50': 'scripts/bootstrap/50-kubeadm-init.sh',
+    '40': 'scripts/bootstrap/stages/40-install-kubernetes/run.sh',
+    '50': 'scripts/bootstrap/stages/50-kubeadm-init/run.sh',
     '60': 'scripts/bootstrap/60-install-cilium.sh',
     '90': 'scripts/bootstrap/90-verify.sh',
 }
@@ -9178,7 +9178,7 @@ class KubeadmInitTest(BootstrapTestCase):
             'kubernetes': (
                 'PHASE=install-kubernetes\nMODE=CHECK\nRESULT=ALREADY_COMPLIANT\n'
                 'REASON=kubernetes-packages-ready\nEVIDENCE=NONE\nEXIT_CODE=0\n'
-                'NEXT=50-kubeadm-init.sh --check\nSHA256=NONE'
+                'NEXT=stages/50-kubeadm-init/run.sh --check\nSHA256=NONE'
             ),
         }
         for name, result_variable in (
@@ -15248,7 +15248,7 @@ class FinalVerifyTest(BootstrapTestCase):
         self.assertTrue(FINAL_VERIFY.exists(), '90-verify.sh entry is missing')
         script = FINAL_VERIFY.read_text(encoding='utf-8')
         for forbidden in (
-            '40-install-kubernetes.sh', 'kubectl apply', 'kubectl patch',
+            self.stage_paths['40'], 'kubectl apply', 'kubectl patch',
             'kubectl delete', 'helm install', 'kubeadm reset', 'set -x',
             '--raw=true',
         ):

@@ -1,0 +1,9 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+*.secret.yaml
+*.secret.yml
+kubeconfig
+artifacts/
+.worktrees/

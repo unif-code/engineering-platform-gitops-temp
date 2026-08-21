@@ -1,0 +1,130 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - gotk-components.yaml
+  - gotk-sync.yaml
+patches:
+  - patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --no-cross-namespace-refs=true
+    target:
+      kind: Deployment
+      name: (kustomize-controller|helm-controller)
+  - patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --no-remote-bases=true
+    target:
+      kind: Deployment
+      name: kustomize-controller
+  - patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --default-service-account=default
+    target:
+      kind: Deployment
+      name: (kustomize-controller|helm-controller)
+  - patch: |
+      - op: add
+        path: /spec/serviceAccountName
+        value: kustomize-controller
+    target:
+      group: kustomize.toolkit.fluxcd.io
+      kind: Kustomization
+      name: flux-system
+      version: v1
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: not-used
+      spec:
+        strategy:
+          rollingUpdate:
+            maxSurge: 1
+            maxUnavailable: 0
+          type: RollingUpdate
+    target:
+      kind: Deployment
+      labelSelector: app.kubernetes.io/part-of=flux
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: source-controller
+      spec:
+        template:
+          spec:
+            containers:
+              - name: manager
+                resources:
+                  limits:
+                    cpu: 200m
+                    memory: 256Mi
+                  requests:
+                    cpu: 25m
+                    memory: 96Mi
+    target:
+      kind: Deployment
+      name: source-controller
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: kustomize-controller
+      spec:
+        template:
+          spec:
+            containers:
+              - name: manager
+                resources:
+                  limits:
+                    cpu: 500m
+                    memory: 512Mi
+                  requests:
+                    cpu: 50m
+                    memory: 128Mi
+    target:
+      kind: Deployment
+      name: kustomize-controller
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: helm-controller
+      spec:
+        template:
+          spec:
+            containers:
+              - name: manager
+                resources:
+                  limits:
+                    cpu: 500m
+                    memory: 512Mi
+                  requests:
+                    cpu: 50m
+                    memory: 128Mi
+    target:
+      kind: Deployment
+      name: helm-controller
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: notification-controller
+      spec:
+        template:
+          spec:
+            containers:
+              - name: manager
+                resources:
+                  limits:
+                    cpu: 100m
+                    memory: 128Mi
+                  requests:
+                    cpu: 10m
+                    memory: 64Mi
+    target:
+      kind: Deployment
+      name: notification-controller

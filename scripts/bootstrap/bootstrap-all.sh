@@ -1,0 +1,481 @@
+#!/bin/bash -p
+set -Eeuo pipefail
+export LC_ALL=C
+umask 077
+IFS=$' \t\n'
+
+readonly -a STAGES=(00 10 20 30 40 50 60 90)
+readonly -a MUTATING_STAGES=(10 20 30 40 50 60)
+
+declare -a SUMMARY_STAGE=()
+declare -a SUMMARY_RESULT=()
+declare -a SUMMARY_EVIDENCE=()
+declare -a SUMMARY_SHA256=()
+SUMMARY_COUNT=0
+git_commit=NONE
+test_mode=false
+
+case "$#:${1:-}" in
+  1:--check) MODE=CHECK ;;
+  1:--apply) MODE=APPLY ;;
+  *)
+    printf 'RESULT=STOP_MODE\nREASON=expected-check-or-apply\n' >&2
+    exit 10
+    ;;
+esac
+readonly MODE
+
+script_source=${BASH_SOURCE[0]}
+case "$script_source" in
+  /*) ;;
+  *) script_source="$PWD/$script_source" ;;
+esac
+script_dir=$(cd "${script_source%/*}" && pwd -P)
+repo_root=$(cd "${script_dir}/../.." && pwd -P)
+
+finish_orchestrator() {
+  local result=$1 reason=$2 code=$3 next_stage=$4
+  local index summary_stage
+
+  for ((index = 0; index < SUMMARY_COUNT; index++)); do
+    summary_stage=${SUMMARY_STAGE[index]}
+    printf 'STAGE_%s_RESULT=%s\n' \
+      "$summary_stage" "${SUMMARY_RESULT[index]}"
+    printf 'STAGE_%s_EVIDENCE=%s\n' \
+      "$summary_stage" "${SUMMARY_EVIDENCE[index]}"
+    printf 'STAGE_%s_SHA256=%s\n' \
+      "$summary_stage" "${SUMMARY_SHA256[index]}"
+  done
+  printf 'PHASE=bootstrap-all\nMODE=%s\nRESULT=%s\nREASON=%s\n' \
+    "$MODE" "$result" "$reason"
+  printf 'GIT_COMMIT=%s\nNEXT_STAGE=%s\nEXIT_CODE=%s\n' \
+    "$git_commit" "$next_stage" "$code"
+  exit "$code"
+}
+
+stop_orchestrator() {
+  finish_orchestrator STOP_ORCHESTRATOR "$1" "$2" NONE
+}
+
+path_owner_uid() {
+  local owner
+
+  owner=$(/usr/bin/stat -f '%u' "$1" 2>/dev/null) || owner=
+  if [[ "$owner" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$owner"
+    return 0
+  fi
+  owner=$(/usr/bin/stat -c '%u' "$1" 2>/dev/null) || return 1
+  [[ "$owner" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$owner"
+}
+
+path_mode() {
+  local mode
+
+  mode=$(/usr/bin/stat -f '%Lp' "$1" 2>/dev/null) || mode=
+  if [[ "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "$mode"
+    return 0
+  fi
+  mode=$(/usr/bin/stat -c '%a' "$1" 2>/dev/null) || return 1
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  printf '%s\n' "$mode"
+}
+
+lock_parent_mode() {
+  local mode
+
+  mode=$(/usr/bin/stat -f '%Mp%Lp' "$1" 2>/dev/null) || mode=
+  if [[ "$mode" =~ ^[0-7]{4}$ ]]; then
+    printf '%s\n' "$mode"
+    return 0
+  fi
+  /usr/bin/stat -c '%a' "$1" 2>/dev/null
+}
+
+safe_owned_directory() {
+  local directory=$1 expected_uid=$2 canonical mode
+
+  [[ "$directory" == /* && "$directory" != / &&
+     -d "$directory" && ! -L "$directory" ]] || return 1
+  canonical=$(cd "$directory" 2>/dev/null && pwd -P) || return 1
+  [[ "$canonical" == "$directory" ]] || return 1
+  [[ "$(path_owner_uid "$directory")" == "$expected_uid" ]] || return 1
+  mode=$(path_mode "$directory") || return 1
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$mode & 0022) == 0 ))
+}
+
+safe_owned_file() {
+  local file=$1 expected_uid=$2 mode
+
+  [[ "$file" == /* && -f "$file" && ! -L "$file" ]] || return 1
+  [[ "$(path_owner_uid "$file")" == "$expected_uid" ]] || return 1
+  mode=$(path_mode "$file") || return 1
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$mode & 0022) == 0 ))
+}
+
+safe_directory_ancestry() {
+  local directory=$1 expected_uid=$2 canonical owner mode parent
+
+  [[ "$directory" == /* && -d "$directory" && ! -L "$directory" ]] ||
+    return 1
+  canonical=$(cd "$directory" 2>/dev/null && pwd -P) || return 1
+  [[ "$canonical" == "$directory" ]] || return 1
+  while :; do
+    [[ -d "$directory" && ! -L "$directory" ]] || return 1
+    owner=$(path_owner_uid "$directory") || return 1
+    [[ "$owner" == 0 || "$owner" == "$expected_uid" ]] || return 1
+    mode=$(path_mode "$directory") || return 1
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+    if (( (8#$mode & 0022) != 0 )); then
+      [[ "$owner" == 0 ]] && (( (8#$mode & 01000) != 0 )) || return 1
+    fi
+    [[ "$directory" != / ]] || break
+    parent=${directory%/*}
+    [[ -n "$parent" ]] || parent=/
+    directory=$parent
+  done
+}
+
+safe_lock_parent() {
+  local directory=$1 expected_uid=$2 canonical mode parent
+
+  [[ "$directory" == /* && "$directory" != / &&
+     -d "$directory" && ! -L "$directory" ]] || return 1
+  canonical=$(cd "$directory" 2>/dev/null && pwd -P) || return 1
+  [[ "$canonical" == "$directory" ]] || return 1
+  [[ "$(path_owner_uid "$directory")" == "$expected_uid" ]] || return 1
+  mode=$(lock_parent_mode "$directory") || return 1
+  [[ "$mode" == 1777 ]] || return 1
+  parent=${directory%/*}
+  [[ -n "$parent" ]] || parent=/
+  safe_directory_ancestry "$parent" "$expected_uid"
+}
+
+acquire_lock() {
+  local expected_uid=$1 lock_parent snapshot_dir snapshot_file create_rc
+
+  lock_parent=${lock_file%/*}
+  safe_lock_parent "$lock_parent" "$expected_uid" ||
+    stop_orchestrator unsafe-lock-parent 30
+
+  if [[ ! -e "$lock_file" && ! -L "$lock_file" ]]; then
+    set +e
+    (set -o noclobber; : >"$lock_file") 2>/dev/null
+    create_rc=$?
+    set -e
+    if (( create_rc != 0 )) &&
+       [[ ! -e "$lock_file" && ! -L "$lock_file" ]]; then
+      stop_orchestrator lock-create-failed 30
+    fi
+  fi
+  safe_owned_file "$lock_file" "$expected_uid" ||
+    stop_orchestrator unsafe-lock-target 30
+
+  snapshot_dir=$(
+    /usr/bin/mktemp -d \
+      "${lock_parent}/.engineering-platform-bootstrap-lock.XXXXXX"
+  ) || stop_orchestrator lock-snapshot-create-failed 30
+  if ! safe_owned_directory "$snapshot_dir" "$expected_uid"; then
+    /bin/rmdir -- "$snapshot_dir" 2>/dev/null || true
+    stop_orchestrator unsafe-lock-snapshot 30
+  fi
+  snapshot_file=${snapshot_dir}/lock
+  if ! /bin/ln -- "$lock_file" "$snapshot_file" 2>/dev/null ||
+     ! safe_owned_file "$snapshot_file" "$expected_uid"; then
+    /bin/rm -f -- "$snapshot_file" 2>/dev/null || true
+    /bin/rmdir -- "$snapshot_dir" 2>/dev/null || true
+    stop_orchestrator unsafe-lock-target 30
+  fi
+  exec 9<>"$snapshot_file"
+  /bin/rm -- "$snapshot_file" || stop_orchestrator lock-snapshot-cleanup-failed 30
+  /bin/rmdir -- "$snapshot_dir" || stop_orchestrator lock-snapshot-cleanup-failed 30
+  "$flock_binary" -n 9 || stop_orchestrator concurrent-run 30
+}
+
+if [[ "${BOOTSTRAP_ORCHESTRATOR_TEST_MODE:-}" == 1 ]]; then
+  test_mode=true
+  git_binary=git
+  [[ "$EUID" -ne 0 ]] || {
+    printf 'RESULT=STOP_TEST_MODE\nREASON=test-mode-is-for-unprivileged-tests-only\n' >&2
+    exit 10
+  }
+  for test_override in "${!BOOTSTRAP_ORCHESTRATOR_TEST_@}"; do
+    case "$test_override" in
+      BOOTSTRAP_ORCHESTRATOR_TEST_MODE|\
+      BOOTSTRAP_ORCHESTRATOR_TEST_STAGE_DIR|\
+      BOOTSTRAP_ORCHESTRATOR_TEST_LOCK_FILE) ;;
+      *) stop_orchestrator test-override-unapproved 10 ;;
+    esac
+  done
+  stage_dir=${BOOTSTRAP_ORCHESTRATOR_TEST_STAGE_DIR:-}
+  lock_file=${BOOTSTRAP_ORCHESTRATOR_TEST_LOCK_FILE:-}
+  state_dir=${ORCHESTRATOR_STATE_DIR:-}
+  lock_parent=${lock_file%/*}
+  if ! safe_directory_ancestry "$repo_root" "$EUID"; then
+    stop_orchestrator unsafe-repository-path 10
+  fi
+  if ! safe_directory_ancestry "$stage_dir" "$EUID" ||
+     ! safe_owned_directory "$state_dir" "$EUID" ||
+     ! safe_lock_parent "$lock_parent" "$EUID"; then
+    stop_orchestrator unsafe-test-path 10
+  fi
+  if [[ -e "$lock_file" || -L "$lock_file" ]]; then
+    safe_owned_file "$lock_file" "$EUID" ||
+      stop_orchestrator unsafe-lock-target 10
+  fi
+  flock_binary=flock
+else
+  for test_override in "${!BOOTSTRAP_ORCHESTRATOR_TEST_@}"; do
+    : "$test_override"
+    printf 'RESULT=STOP_TEST_OVERRIDE\nREASON=test-override-in-production\n' >&2
+    exit 10
+  done
+  for git_override in "${!GIT_@}"; do
+    : "$git_override"
+    printf 'RESULT=STOP_PRECONDITION\nREASON=untrusted-git-environment\n' >&2
+    exit 10
+  done
+  export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+  git_binary=/usr/bin/git
+  flock_binary=/usr/bin/flock
+  stage_dir=$script_dir
+  lock_file=/run/lock/engineering-platform-bootstrap.lock
+  [[ "$MODE" != APPLY || "$EUID" -eq 0 ]] ||
+    stop_orchestrator not-root 10
+  safe_directory_ancestry "$repo_root" 0 ||
+    stop_orchestrator unsafe-repository-path 30
+  safe_directory_ancestry "$stage_dir" 0 ||
+    stop_orchestrator unsafe-stage-directory 30
+fi
+readonly stage_dir lock_file git_binary flock_binary
+
+stage_path() {
+  case "$1" in
+    00) printf '%s/00-preflight.sh\n' "$stage_dir" ;;
+    10) printf '%s/10-stage-artifacts.sh\n' "$stage_dir" ;;
+    20) printf '%s/20-prepare-kernel.sh\n' "$stage_dir" ;;
+    30) printf '%s/30-install-containerd.sh\n' "$stage_dir" ;;
+    40) printf '%s/40-install-kubernetes.sh\n' "$stage_dir" ;;
+    50) printf '%s/50-kubeadm-init.sh\n' "$stage_dir" ;;
+    60) printf '%s/60-install-cilium.sh\n' "$stage_dir" ;;
+    90) printf '%s/90-verify.sh\n' "$stage_dir" ;;
+    *) return 30 ;;
+  esac
+}
+
+check_result_is_complete() {
+  case "$1:$2" in
+    00:PASS_PREFLIGHT|10:ALREADY_COMPLIANT|20:ALREADY_COMPLIANT|\
+    30:ALREADY_COMPLIANT|40:ALREADY_COMPLIANT|50:ALREADY_COMPLIANT|\
+    60:ALREADY_COMPLIANT|90:PASS_BOOTSTRAP_VERIFIED) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+check_result_requires_apply() {
+  case "$1:$2" in
+    10:PASS_ARTIFACTS_CHECK|20:PASS_KERNEL_CHECK|\
+    30:PASS_CONTAINERD_CHECK|40:PASS_KUBERNETES_CHECK|\
+    50:PASS_KUBEADM_CHECK|60:PASS_CILIUM_CHECK) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+apply_result_is_success() {
+  case "$1:$2" in
+    10:PASS_ARTIFACTS_STAGED|20:PASS_KERNEL_PREPARED|\
+    30:PASS_CONTAINERD_INSTALLED|40:PASS_KUBERNETES_INSTALLED|\
+    50:PASS_KUBEADM_INITIALIZED|60:PASS_CILIUM_INSTALLED|\
+    10:ALREADY_COMPLIANT|20:ALREADY_COMPLIANT|30:ALREADY_COMPLIANT|\
+    40:ALREADY_COMPLIANT|50:ALREADY_COMPLIANT|60:ALREADY_COMPLIANT) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+stage_is_mutating() {
+  local expected
+  for expected in "${MUTATING_STAGES[@]}"; do
+    [[ "$1" != "$expected" ]] || return 0
+  done
+  return 1
+}
+
+record_stage_summary() {
+  SUMMARY_STAGE[SUMMARY_COUNT]=$1
+  SUMMARY_RESULT[SUMMARY_COUNT]=$STAGE_RESULT
+  SUMMARY_EVIDENCE[SUMMARY_COUNT]=$STAGE_EVIDENCE
+  SUMMARY_SHA256[SUMMARY_COUNT]=$STAGE_SHA256
+  SUMMARY_COUNT=$((SUMMARY_COUNT + 1))
+}
+
+run_stage() {
+  local stage=$1 operation=$2 script captured rc result_count exit_count
+  local valid_exit_count evidence_count sha_count expected_uid
+
+  script=$(stage_path "$stage") || return 30
+  expected_uid=0
+  [[ "$test_mode" != true ]] || expected_uid=$EUID
+  if ! safe_owned_file "$script" "$expected_uid" || [[ ! -x "$script" ]]; then
+    stop_orchestrator unsafe-stage-file 30
+  fi
+
+  set +e
+  if [[ "$test_mode" == true ]]; then
+    captured=$(/usr/bin/env -u BASH_ENV -u ENV \
+      /bin/bash -p "$script" "--${operation}" 2>&1)
+  else
+    captured=$(/usr/bin/env -u BASH_ENV -u ENV -u ORCHESTRATOR_STATE_DIR \
+      /bin/bash -p "$script" "--${operation}" 2>&1)
+  fi
+  rc=$?
+  set -e
+  if (( rc != 0 )); then
+    printf '%s\n' "$captured"
+    return "$rc"
+  fi
+
+  result_count=$(printf '%s\n' "$captured" |
+    awk -F= '$1=="RESULT" {count++} END {print count+0}')
+  exit_count=$(printf '%s\n' "$captured" |
+    awk -F= '$1=="EXIT_CODE" {count++} END {print count+0}')
+  valid_exit_count=$(printf '%s\n' "$captured" |
+    awk '$0=="EXIT_CODE=0" {count++} END {print count+0}')
+  evidence_count=$(printf '%s\n' "$captured" |
+    awk -F= '$1=="EVIDENCE" {count++} END {print count+0}')
+  sha_count=$(printf '%s\n' "$captured" |
+    awk -F= '$1=="SHA256" {count++} END {print count+0}')
+  if [[ "$result_count" != 1 || "$exit_count" != 1 ||
+        "$valid_exit_count" != 1 ||
+        "$evidence_count" != 1 || "$sha_count" != 1 ]]; then
+    stop_orchestrator invalid-stage-output 30
+  fi
+
+  STAGE_RESULT=$(printf '%s\n' "$captured" |
+    awk -F= '$1=="RESULT" {print substr($0,8)}')
+  STAGE_EVIDENCE=$(printf '%s\n' "$captured" |
+    awk -F= '$1=="EVIDENCE" {print substr($0,10)}')
+  STAGE_SHA256=$(printf '%s\n' "$captured" |
+    awk -F= '$1=="SHA256" {print substr($0,8)}')
+
+  case "$STAGE_EVIDENCE" in
+    NONE) ;;
+    /*)
+      [[ ! "$STAGE_EVIDENCE" =~ [[:cntrl:]] ]] ||
+        stop_orchestrator invalid-stage-output 30
+      ;;
+    *) stop_orchestrator invalid-stage-output 30 ;;
+  esac
+  [[ "$STAGE_SHA256" == NONE ||
+     "$STAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+    stop_orchestrator invalid-stage-output 30
+}
+
+if [[ "$test_mode" == true ]]; then
+  expected_stage_uid=$EUID
+else
+  expected_stage_uid=0
+  safe_owned_directory "$stage_dir" 0 ||
+    stop_orchestrator unsafe-stage-directory 30
+fi
+readonly expected_stage_uid
+
+# 每个 stage 都以 root source lib/*.sh，这些文件与 stage 脚本同属供应链，
+# 必须在任何 stage 启动前完成属主与权限校验。目录内的每一个条目都要过门禁：
+# dotglob 让点文件无法绕过通配，nullglob 让空目录退化为计数 0 而不是字面量。
+library_dir="${stage_dir}/lib"
+safe_owned_directory "$library_dir" "$expected_stage_uid" ||
+  stop_orchestrator unsafe-library-file 30
+library_file_count=0
+shopt -s dotglob nullglob
+for library_file in "$library_dir"/*; do
+  library_file_count=$((library_file_count + 1))
+  safe_owned_file "$library_file" "$expected_stage_uid" ||
+    stop_orchestrator unsafe-library-file 30
+done
+shopt -u dotglob nullglob
+(( library_file_count > 0 )) || stop_orchestrator unsafe-library-file 30
+readonly library_dir
+
+for stage in "${STAGES[@]}"; do
+  stage_script=$(stage_path "$stage") || stop_orchestrator invalid-stage-map 30
+  if ! safe_owned_file "$stage_script" "$expected_stage_uid" ||
+     [[ ! -x "$stage_script" ]]; then
+    stop_orchestrator unsafe-stage-file 30
+  fi
+done
+
+git_commit=$("$git_binary" -C "$repo_root" rev-parse HEAD 2>/dev/null) ||
+  stop_orchestrator git-commit-unreadable 30
+[[ "$git_commit" =~ ^[0-9a-f]{40}$ ]] ||
+  stop_orchestrator git-commit-invalid 30
+readonly git_commit
+
+if [[ "$MODE" == APPLY ]]; then
+  [[ "$test_mode" == true || "$EUID" -eq 0 ]] ||
+    stop_orchestrator not-root 10
+  [[ "$("$git_binary" -C "$repo_root" branch --show-current 2>/dev/null)" == main ]] ||
+    stop_orchestrator current-branch-not-main 30
+  if ! worktree_status=$(
+    "$git_binary" -C "$repo_root" status --porcelain=v1 --untracked-files=all 2>/dev/null
+  ); then
+    stop_orchestrator worktree-state-unreadable 30
+  fi
+  [[ -z "$worktree_status" ]] ||
+    stop_orchestrator worktree-not-clean 30
+
+  lock_uid=0
+  [[ "$test_mode" != true ]] || lock_uid=$EUID
+  acquire_lock "$lock_uid"
+fi
+
+for stage in "${STAGES[@]}"; do
+  set +e
+  run_stage "$stage" check
+  rc=$?
+  set -e
+  (( rc == 0 )) || exit "$rc"
+
+  if check_result_is_complete "$stage" "$STAGE_RESULT"; then
+    record_stage_summary "$stage"
+    continue
+  fi
+  if [[ "$MODE" == CHECK ]] &&
+     check_result_requires_apply "$stage" "$STAGE_RESULT"; then
+    record_stage_summary "$stage"
+    finish_orchestrator PASS_BOOTSTRAP_CHECK apply-required 0 "$stage"
+  fi
+  if [[ "$MODE" == APPLY ]] &&
+     check_result_requires_apply "$stage" "$STAGE_RESULT"; then
+    record_stage_summary "$stage"
+    stage_is_mutating "$stage" || stop_orchestrator invalid-stage-result 30
+    set +e
+    run_stage "$stage" apply
+    rc=$?
+    set -e
+    (( rc == 0 )) || exit "$rc"
+    apply_result_is_success "$stage" "$STAGE_RESULT" ||
+      stop_orchestrator invalid-apply-result 30
+    record_stage_summary "$stage"
+
+    set +e
+    run_stage "$stage" check
+    rc=$?
+    set -e
+    (( rc == 0 )) || exit "$rc"
+    [[ "$STAGE_RESULT" == ALREADY_COMPLIANT ]] ||
+      stop_orchestrator post-apply-check-not-compliant 30
+    record_stage_summary "$stage"
+    continue
+  fi
+  stop_orchestrator invalid-stage-result 30
+done
+
+if [[ "$MODE" == CHECK ]]; then
+  finish_orchestrator PASS_BOOTSTRAP_ALL_CHECK \
+    bootstrap-check-complete 0 NONE
+fi
+finish_orchestrator PASS_BOOTSTRAP_ALL bootstrap-complete 0 NONE

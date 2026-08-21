@@ -1,0 +1,50 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: metrics-server
+  namespace: monitoring
+spec:
+  chart:
+    spec:
+      chart: metrics-server
+      interval: 24h
+      reconcileStrategy: ChartVersion
+      sourceRef:
+        kind: HelmRepository
+        name: metrics-server
+      version: 3.13.1
+  driftDetection:
+    mode: enabled
+  install:
+    remediation:
+      retries: 3
+  interval: 30m
+  releaseName: metrics-server
+  serviceAccountName: monitoring-helm-reconciler
+  targetNamespace: kube-system
+  timeout: 10m
+  upgrade:
+    remediation:
+      remediateLastFailure: true
+      retries: 3
+  values:
+    apiService:
+      insecureSkipTLSVerify: false
+    image:
+      repository: registry.k8s.io/metrics-server/metrics-server
+      tag: v0.8.1@sha256:6231fb0a1ffab76c92ab880f51a0d11b290f688373647bcedff85af025dfd8a9
+    replicas: 1
+    resources:
+      limits:
+        cpu: 100m
+        memory: 128Mi
+      requests:
+        cpu: 20m
+        memory: 64Mi
+    tls:
+      certManager:
+        existingIssuer:
+          enabled: true
+          kind: ClusterIssuer
+          name: dev-selfsigned
+      type: cert-manager

@@ -1,0 +1,4 @@
+# STATUS: BLOCKED
+# ACTIVE: false
+# REASON: Flux controller manifest 尚未由锁定版本生成
+# ACTIVATION_GATES: bootstrap 最终验证通过并完成 Flux 版本与生成命令独立审阅

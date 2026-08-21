@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: flux
+    app.kubernetes.io/part-of: engineering-platform
+  name: flux-controllers
+  namespace: monitoring
+spec:
+  endpoints:
+    - interval: 30s
+      port: http-prom
+      scrapeTimeout: 10s
+  namespaceSelector:
+    matchNames:
+      - flux-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux

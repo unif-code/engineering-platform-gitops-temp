@@ -1,0 +1,64 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  labels:
+    app.kubernetes.io/name: dev-infra-alerts
+    app.kubernetes.io/part-of: engineering-platform
+  name: dev-infra-alerts
+  namespace: monitoring
+spec:
+  groups:
+    - name: dev-infrastructure
+      rules:
+        - alert: NodePressure
+          annotations:
+            description: '节点 {{ $labels.node }} 持续处于 {{ $labels.condition }}。'
+            summary: DEV 单节点出现资源压力
+          expr: kube_node_status_condition{condition=~"MemoryPressure|DiskPressure|PIDPressure",status="true"} == 1
+          for: 5m
+          labels:
+            severity: critical
+        - alert: FluxReconcileFailed
+          annotations:
+            description: 'Flux {{ $labels.kind }}/{{ $labels.namespace }}/{{ $labels.name }} Reconcile 未 Ready。'
+            summary: Flux Reconcile 失败
+          expr: gotk_reconcile_condition{status="False",type="Ready"} == 1
+          for: 5m
+          labels:
+            severity: critical
+        - alert: CNPGBackupFailed
+          annotations:
+            description: PostgreSQL 最近一次备份失败晚于最近一次可用备份，或首次备份即失败。
+            summary: CloudNativePG 备份失败
+          expr: max(barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp) > (max(barman_cloud_cloudnative_pg_io_last_available_backup_timestamp) or vector(0))
+          for: 5m
+          labels:
+            severity: critical
+        - alert: MinIODown
+          annotations:
+            description: MinIO metrics target 持续不可达。
+            summary: MinIO 不可用
+          expr: absent(up{job="minio"}) or up{job="minio"} == 0
+          for: 2m
+          labels:
+            severity: critical
+        - alert: NodeRootFilesystemUsageHigh
+          annotations:
+            description: '根文件系统使用率已达到 80%，必须复核 DEV-002 容量预算。'
+            summary: DEV 根文件系统容量告警
+          expr: >-
+            100 * (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
+            / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}) >= 80
+          for: 10m
+          labels:
+            severity: warning
+        - alert: NodeRootFilesystemUsageCritical
+          annotations:
+            description: '根文件系统使用率已达到 90%；停止新发布、PVC 变更和恢复演练。'
+            summary: DEV 根文件系统触发 Stop Gate
+          expr: >-
+            100 * (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
+            / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}) >= 90
+          for: 5m
+          labels:
+            severity: critical

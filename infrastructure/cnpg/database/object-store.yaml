@@ -1,0 +1,38 @@
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  labels:
+    app.kubernetes.io/name: platform-postgres
+    app.kubernetes.io/part-of: engineering-platform
+  name: platform-backup
+  namespace: platform
+spec:
+  configuration:
+    data:
+      compression: lz4
+      jobs: 1
+    destinationPath: s3://postgres-backup/platform/
+    endpointCA:
+      key: ca.crt
+      name: minio-ca
+    endpointURL: https://minio.minio.svc.cluster.local:9000
+    s3Credentials:
+      accessKeyId:
+        key: ACCESS_KEY_ID
+        name: pg-backup-minio
+      secretAccessKey:
+        key: ACCESS_SECRET_KEY
+        name: pg-backup-minio
+    wal:
+      compression: lz4
+      maxParallel: 1
+  instanceSidecarConfiguration:
+    logLevel: info
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+  retentionPolicy: 7d

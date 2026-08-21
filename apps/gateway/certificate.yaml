@@ -1,0 +1,22 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  labels:
+    app.kubernetes.io/name: platform-gateway
+    app.kubernetes.io/part-of: engineering-platform
+    platform.unif.internal/environment: dev
+  name: platform-gateway-tls
+  namespace: platform
+spec:
+  dnsNames:
+    - platform.dev.local
+  duration: 720h
+  issuerRef:
+    kind: ClusterIssuer
+    name: dev-selfsigned
+  privateKey:
+    algorithm: ECDSA
+    rotationPolicy: Always
+    size: 256
+  renewBefore: 240h
+  secretName: platform-gateway-tls

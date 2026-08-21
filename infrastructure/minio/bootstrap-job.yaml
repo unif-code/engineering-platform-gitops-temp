@@ -1,0 +1,150 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: minio-bootstrap
+  namespace: minio
+automountServiceAccountToken: false
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    app.kubernetes.io/name: minio-bootstrap
+    app.kubernetes.io/part-of: engineering-platform
+    app.kubernetes.io/version: RELEASE.2025-08-13T08-35-41Z
+  name: minio-bootstrap-v1
+  namespace: minio
+spec:
+  activeDeadlineSeconds: 600
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio-bootstrap
+        app.kubernetes.io/part-of: engineering-platform
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - args:
+            - |-
+              set -eu
+              until mc alias set dev https://minio.minio.svc.cluster.local:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
+                sleep 2
+              done
+
+              mc mb --ignore-existing --with-lock dev/postgres-backup
+              mc mb --ignore-existing --with-lock dev/etcd-backup
+              mc mb --ignore-existing --with-lock dev/audit-worm
+              mc version enable dev/postgres-backup
+              mc version enable dev/etcd-backup
+              mc version enable dev/audit-worm
+              mc quota set dev/postgres-backup --size 30Gi
+              mc quota set dev/etcd-backup --size 5Gi
+              mc quota set dev/audit-worm --size 5Gi
+              mc retention set --default GOVERNANCE 7d dev/postgres-backup
+              mc anonymous set none dev/postgres-backup
+              mc anonymous set none dev/etcd-backup
+              mc anonymous set none dev/audit-worm
+
+              mc admin user add dev "$POSTGRES_ACCESS_KEY" "$POSTGRES_SECRET_KEY"
+              mc admin user add dev "$ETCD_ACCESS_KEY" "$ETCD_SECRET_KEY"
+              mc admin user add dev "$AUDIT_ACCESS_KEY" "$AUDIT_SECRET_KEY"
+              mc admin policy create dev postgres-backup-policy /policies/postgres-backup.json
+              mc admin policy create dev etcd-backup-policy /policies/etcd-backup.json
+              mc admin policy create dev audit-worm-policy /policies/audit-worm.json
+              mc admin policy attach dev postgres-backup-policy --user "$POSTGRES_ACCESS_KEY"
+              mc admin policy attach dev etcd-backup-policy --user "$ETCD_ACCESS_KEY"
+              mc admin policy attach dev audit-worm-policy --user "$AUDIT_ACCESS_KEY"
+          command:
+            - /bin/sh
+            - -c
+          env:
+            - name: AUDIT_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: auditAccessKey
+                  name: minio-bootstrap-users
+            - name: AUDIT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: auditSecretKey
+                  name: minio-bootstrap-users
+            - name: ETCD_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: etcdAccessKey
+                  name: minio-bootstrap-users
+            - name: ETCD_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: etcdSecretKey
+                  name: minio-bootstrap-users
+            - name: MC_CONFIG_DIR
+              value: /tmp/mc
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: minio-root
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  key: user
+                  name: minio-root
+            - name: POSTGRES_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: postgresAccessKey
+                  name: minio-bootstrap-users
+            - name: POSTGRES_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: postgresSecretKey
+                  name: minio-bootstrap-users
+            - name: SSL_CERT_FILE
+              value: /etc/minio-ca/ca.crt
+          image: quay.io/minio/mc@sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780
+          imagePullPolicy: IfNotPresent
+          name: mc
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - mountPath: /etc/minio-ca
+              name: minio-ca
+              readOnly: true
+            - mountPath: /policies
+              name: policies
+              readOnly: true
+            - mountPath: /tmp
+              name: tmp
+      restartPolicy: OnFailure
+      securityContext:
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: minio-bootstrap
+      volumes:
+        - name: minio-ca
+          secret:
+            items:
+              - key: tls.crt
+                path: ca.crt
+            secretName: minio-tls
+        - configMap:
+            name: minio-bootstrap-policies
+          name: policies
+        - emptyDir: {}
+          name: tmp

@@ -1,0 +1,121 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kube-prometheus-stack
+  namespace: monitoring
+spec:
+  chart:
+    spec:
+      chart: kube-prometheus-stack
+      interval: 24h
+      reconcileStrategy: ChartVersion
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+      version: 88.1.5
+  driftDetection:
+    mode: enabled
+  install:
+    crds: CreateReplace
+    remediation:
+      retries: 3
+  interval: 30m
+  releaseName: kube-prometheus-stack
+  serviceAccountName: monitoring-helm-reconciler
+  timeout: 15m
+  upgrade:
+    crds: CreateReplace
+    remediation:
+      remediateLastFailure: true
+      retries: 3
+  values:
+    alertmanager:
+      alertmanagerSpec:
+        replicas: 1
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 20m
+            memory: 64Mi
+        storage:
+          volumeClaimTemplate:
+            spec:
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 1Gi
+              storageClassName: stateful-rwo-lowlatency
+    grafana:
+      alerting: {}
+      defaultDashboardsEnabled: true
+      grafana.ini:
+        alerting:
+          enabled: false
+        unified_alerting:
+          enabled: false
+      persistence:
+        accessModes:
+          - ReadWriteOnce
+        enabled: true
+        size: 2Gi
+        storageClassName: stateful-rwo-lowlatency
+      replicas: 1
+      resources:
+        limits:
+          cpu: 500m
+          memory: 512Mi
+        requests:
+          cpu: 50m
+          memory: 128Mi
+    kube-state-metrics:
+      resources:
+        limits:
+          cpu: 200m
+          memory: 128Mi
+        requests:
+          cpu: 20m
+          memory: 64Mi
+    prometheus:
+      prometheusSpec:
+        podMonitorNamespaceSelector: {}
+        podMonitorSelectorNilUsesHelmValues: false
+        replicas: 1
+        resources:
+          limits:
+            cpu: '1'
+            memory: 2Gi
+          requests:
+            cpu: 200m
+            memory: 512Mi
+        retention: 7d
+        retentionSize: 8GB
+        serviceMonitorNamespaceSelector: {}
+        serviceMonitorSelectorNilUsesHelmValues: false
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 10Gi
+              storageClassName: stateful-rwo-lowlatency
+    prometheus-node-exporter:
+      resources:
+        limits:
+          cpu: 100m
+          memory: 64Mi
+        requests:
+          cpu: 20m
+          memory: 32Mi
+    prometheusOperator:
+      resources:
+        limits:
+          cpu: 300m
+          memory: 256Mi
+        requests:
+          cpu: 50m
+          memory: 128Mi

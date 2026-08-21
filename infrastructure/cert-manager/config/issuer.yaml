@@ -1,0 +1,9 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  labels:
+    app.kubernetes.io/part-of: engineering-platform
+    platform.unif.internal/environment: dev
+  name: dev-selfsigned
+spec:
+  selfSigned: {}

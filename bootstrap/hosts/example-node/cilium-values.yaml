@@ -1,0 +1,27 @@
+kubeProxyReplacement: true
+k8sServiceHost: 192.0.2.10
+k8sServicePort: 6443
+
+cgroup:
+  autoMount:
+    enabled: false
+  hostRoot: /sys/fs/cgroup
+
+gatewayAPI:
+  enabled: true
+
+hubble:
+  enabled: false
+
+image:
+  digest: sha256:383968cd5e8873f7976fa76aa6196045643558f4cc9518a207b9335cb24a0e93
+  useDigest: true
+
+ipam:
+  mode: kubernetes
+
+operator:
+  image:
+    genericDigest: sha256:80744a8cc7c91c2f9e6347629406844eb35d79b30a732c6d41c15b17232a74f3
+    useDigest: true
+  replicas: 1

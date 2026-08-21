@@ -1,0 +1,4 @@
+# STATUS: BLOCKED
+# ACTIVE: false
+# REASON: Flux GitRepository 与同步 Kustomization 尚未由锁定版本生成
+# ACTIVATION_GATES: bootstrap 最终验证、只读 deploy key 与受保护 main 同步配置审阅通过

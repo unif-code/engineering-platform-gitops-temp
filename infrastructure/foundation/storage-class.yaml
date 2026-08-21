@@ -1,0 +1,13 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  annotations:
+    storageclass.kubernetes.io/is-default-class: 'false'
+  labels:
+    app.kubernetes.io/part-of: engineering-platform
+    platform.unif.internal/environment: dev
+  name: stateful-rwo-lowlatency
+allowVolumeExpansion: false
+provisioner: rancher.io/local-path
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer

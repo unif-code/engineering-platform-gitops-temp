@@ -1,0 +1,17 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  labels:
+    app.kubernetes.io/name: platform-postgres
+    app.kubernetes.io/part-of: engineering-platform
+  name: platform-daily
+  namespace: platform
+spec:
+  backupOwnerReference: self
+  cluster:
+    name: platform
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+  schedule: 0 0 2 * * *
+  target: primary

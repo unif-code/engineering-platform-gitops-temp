@@ -1,0 +1,48 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: plugin-barman-cloud
+  namespace: cnpg-system
+spec:
+  chart:
+    spec:
+      chart: plugin-barman-cloud
+      interval: 24h
+      reconcileStrategy: ChartVersion
+      sourceRef:
+        kind: HelmRepository
+        name: cloudnative-pg
+      version: 0.7.0
+  dependsOn:
+    - name: cloudnative-pg
+  driftDetection:
+    mode: enabled
+  install:
+    crds: CreateReplace
+    remediation:
+      retries: 3
+  interval: 30m
+  releaseName: plugin-barman-cloud
+  serviceAccountName: barman-helm-reconciler
+  timeout: 10m
+  upgrade:
+    crds: CreateReplace
+    remediation:
+      remediateLastFailure: true
+      retries: 3
+  values:
+    image:
+      pullPolicy: IfNotPresent
+      tag: v0.13.0
+    replicaCount: 1
+    resources:
+      limits:
+        cpu: 300m
+        memory: 256Mi
+      requests:
+        cpu: 50m
+        memory: 128Mi
+    sidecarImage:
+      tag: v0.13.0
+    updateStrategy:
+      type: Recreate

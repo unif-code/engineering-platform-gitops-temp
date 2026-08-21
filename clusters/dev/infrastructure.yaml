@@ -1,0 +1,180 @@
+# STATUS: STAGED
+# ACTIVE: false
+# REASON: Cluster foundation 与平台基础设施尚未获准激活
+# ACTIVATION_GATES: bootstrap 最终验证、Flux bootstrap 与各组件供应链 Gate 全部通过
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infrastructure-foundation
+  namespace: flux-system
+spec:
+  healthChecks:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: local-path-provisioner
+      namespace: local-path-storage
+  interval: 10m
+  path: ./infrastructure/foundation
+  prune: true
+  retryInterval: 1m
+  serviceAccountName: flux-foundation-reconciler
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  timeout: 10m
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cert-manager-controller
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: infrastructure-foundation
+  interval: 10m
+  path: ./infrastructure/cert-manager/controller
+  prune: true
+  retryInterval: 1m
+  serviceAccountName: flux-foundation-reconciler
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  timeout: 10m
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cert-manager-config
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: cert-manager-controller
+  interval: 10m
+  path: ./infrastructure/cert-manager/config
+  prune: true
+  retryInterval: 1m
+  serviceAccountName: flux-foundation-reconciler
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  timeout: 5m
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: minio
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: cert-manager-config
+    - name: infrastructure-foundation
+  interval: 10m
+  path: ./infrastructure/minio
+  prune: true
+  retryInterval: 1m
+  serviceAccountName: flux-minio-reconciler
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  timeout: 10m
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: observability-controller
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: cert-manager-config
+    - name: infrastructure-foundation
+  interval: 10m
+  path: ./infrastructure/observability/controller
+  prune: true
+  retryInterval: 1m
+  serviceAccountName: flux-foundation-reconciler
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  timeout: 15m
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: observability-config
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: observability-controller
+  interval: 10m
+  path: ./infrastructure/observability/config
+  prune: true
+  retryInterval: 1m
+  serviceAccountName: flux-observability-config-reconciler
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  timeout: 5m
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cnpg-controller
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: cert-manager-controller
+  interval: 10m
+  path: ./infrastructure/cnpg/controller
+  prune: true
+  retryInterval: 1m
+  serviceAccountName: flux-foundation-reconciler
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  timeout: 15m
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: platform-database
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: cnpg-controller
+    - name: minio
+  interval: 10m
+  path: ./infrastructure/cnpg/database
+  prune: true
+  retryInterval: 1m
+  serviceAccountName: flux-platform-reconciler
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  timeout: 15m
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: etcd-backup
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: minio
+  interval: 10m
+  path: ./infrastructure/etcd-backup
+  prune: true
+  retryInterval: 1m
+  serviceAccountName: flux-etcd-backup-reconciler
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  timeout: 5m
+  wait: true

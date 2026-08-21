@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: platform-postgres
+    app.kubernetes.io/part-of: engineering-platform
+  name: platform-postgres
+  namespace: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - platform
+  podMetricsEndpoints:
+    - interval: 30s
+      port: metrics
+      scrapeTimeout: 10s
+  selector:
+    matchLabels:
+      cnpg.io/cluster: platform

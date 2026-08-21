@@ -1,0 +1,51 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  labels:
+    app.kubernetes.io/name: platform-postgres
+    app.kubernetes.io/part-of: engineering-platform
+    app.kubernetes.io/version: '18.4'
+    platform.unif.internal/availability: non-ha
+  name: platform
+  namespace: platform
+spec:
+  bootstrap:
+    initdb:
+      database: platform
+      encoding: UTF8
+      localeCType: C.UTF-8
+      localeCollate: C.UTF-8
+      owner: platform_app
+  enableSuperuserAccess: true
+  imageName: ghcr.io/cloudnative-pg/postgresql@sha256:ae0ec6943c3c24b0de87f93b73ac531a8e546a4cc895655f793547eed2fdbef1
+  imagePullPolicy: IfNotPresent
+  instances: 1
+  managed:
+    roles:
+      - ensure: present
+        login: true
+        name: audit_rw
+        passwordSecret:
+          name: platform-audit-rw
+        superuser: false
+  monitoring:
+    enablePodMonitor: false
+  plugins:
+    - isWALArchiver: true
+      name: barman-cloud.cloudnative-pg.io
+      parameters:
+        barmanObjectName: platform-backup
+  postgresql:
+    parameters:
+      archive_timeout: 5min
+  primaryUpdateStrategy: unsupervised
+  resources:
+    limits:
+      cpu: '2'
+      memory: 4Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+  storage:
+    size: 20Gi
+    storageClass: stateful-rwo-lowlatency

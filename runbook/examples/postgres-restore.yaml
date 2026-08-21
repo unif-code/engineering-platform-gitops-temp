@@ -1,0 +1,70 @@
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  labels:
+    app.kubernetes.io/name: platform-postgres-restore
+    app.kubernetes.io/part-of: engineering-platform
+  name: platform-restore-source
+  namespace: platform
+spec:
+  configuration:
+    destinationPath: s3://postgres-backup/platform/
+    endpointCA:
+      key: ca.crt
+      name: minio-ca
+    endpointURL: https://minio.minio.svc.cluster.local:9000
+    s3Credentials:
+      accessKeyId:
+        key: ACCESS_KEY_ID
+        name: pg-backup-minio
+      secretAccessKey:
+        key: ACCESS_SECRET_KEY
+        name: pg-backup-minio
+    wal:
+      maxParallel: 1
+  instanceSidecarConfiguration:
+    logLevel: info
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  labels:
+    app.kubernetes.io/name: platform-postgres-restore
+    app.kubernetes.io/part-of: engineering-platform
+    app.kubernetes.io/version: '18.4'
+    platform.unif.internal/availability: non-ha
+  name: platform-restore
+  namespace: platform
+spec:
+  bootstrap:
+    recovery:
+      recoveryTarget:
+        targetTime: REPLACE_WITH_RFC3339_UTC
+      source: origin
+  externalClusters:
+    - name: origin
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: platform-restore-source
+          serverName: platform
+  imageName: ghcr.io/cloudnative-pg/postgresql@sha256:ae0ec6943c3c24b0de87f93b73ac531a8e546a4cc895655f793547eed2fdbef1
+  imagePullPolicy: IfNotPresent
+  instances: 1
+  resources:
+    limits:
+      cpu: '2'
+      memory: 4Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+  storage:
+    size: 20Gi
+    storageClass: stateful-rwo-lowlatency

@@ -1,0 +1,28 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/part-of: engineering-platform
+  name: minio
+  namespace: monitoring
+spec:
+  endpoints:
+    - interval: 30s
+      path: /minio/v2/metrics/cluster
+      port: api
+      scheme: https
+      scrapeTimeout: 10s
+      tlsConfig:
+        ca:
+          secret:
+            key: ca.crt
+            name: minio-ca
+        serverName: minio.minio.svc.cluster.local
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames:
+      - minio
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio

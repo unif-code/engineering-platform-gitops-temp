@@ -1,0 +1,128 @@
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Python validation dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-venv"
+          "$RUNNER_TEMP/validation-venv/bin/python" -m pip install \
+            --disable-pip-version-check PyYAML==6.0.3
+          echo "$RUNNER_TEMP/validation-venv/bin" >>"$GITHUB_PATH"
+      - name: Validate validation catalog
+        run: python3 -B scripts/run_validation.py --validate-catalog
+      - id: matrix
+        run: echo "matrix=$(python3 -B scripts/run_validation.py --matrix)" >>"$GITHUB_OUTPUT"
+
+  tests:
+    needs: plan
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Python validation dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-venv"
+          "$RUNNER_TEMP/validation-venv/bin/python" -m pip install \
+            --disable-pip-version-check PyYAML==6.0.3
+          echo "$RUNNER_TEMP/validation-venv/bin" >>"$GITHUB_PATH"
+      # 字节码写入用 -B 关掉，不用 job 级 env: PYTHONDONTWRITEBYTECODE——那会被导出
+      # 并继承进用例派生的 stage 子进程，撞上 stage 60/90 的 ${!PYTHON@} 不可信环境
+      # 守卫（它排在测试变量守卫之前），把两条子用例判成假红。-B 只作用于本进程。
+      - run: python3 -B scripts/run_validation.py --shard "${{ matrix.shard }}"
+
+  static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Python validation dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-venv"
+          "$RUNNER_TEMP/validation-venv/bin/python" -m pip install \
+            --disable-pip-version-check PyYAML==6.0.3
+          echo "$RUNNER_TEMP/validation-venv/bin" >>"$GITHUB_PATH"
+      - name: Install static validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends shellcheck=0.9.0-1
+          test "$(shellcheck --version | awk '/^version:/ {print $2}')" = 0.9.0
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/kubectl" \
+            https://dl.k8s.io/release/v1.36.3/bin/linux/amd64/kubectl
+          printf '%s  %s\n' \
+            ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336 \
+            "$RUNNER_TEMP/kubectl" | sha256sum --check --status
+          install -d "$RUNNER_TEMP/bin"
+          install -m 0755 "$RUNNER_TEMP/kubectl" "$RUNNER_TEMP/bin/kubectl"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+      - run: ./scripts/validate-static.sh
+
+  validation-gate:
+    if: ${{ always() }}
+    needs: [plan, tests, static]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every validation job
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+          STATIC_RESULT: ${{ needs.static.result }}
+        run: |
+          test "$PLAN_RESULT" = success
+          test "$TESTS_RESULT" = success
+          test "$STATIC_RESULT" = success
+
+  publish-validated:
+    # validation-gate 全绿的 main 提交才发布到 validated；服务器 run-approved.sh 不带
+    # SHA 时只部署这个引用，避免运维手工转述 40 位字符时出错或误装未过门禁的提交。
+    needs: [validation-gate]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Point validated at the gated commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GATED_SHA: ${{ github.sha }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$TARGET_REPOSITORY/git/ref/heads/validated" >/dev/null 2>&1
+          then
+            gh api --method PATCH \
+              "repos/$TARGET_REPOSITORY/git/refs/heads/validated" \
+              --raw-field sha="$GATED_SHA" --field force=false >/dev/null
+          else
+            gh api --method POST "repos/$TARGET_REPOSITORY/git/refs" \
+              --raw-field ref=refs/heads/validated \
+              --raw-field sha="$GATED_SHA" >/dev/null
+          fi
+          printf 'VALIDATED_SHA=%s\n' "$GATED_SHA"

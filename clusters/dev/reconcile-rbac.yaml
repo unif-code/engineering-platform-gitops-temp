@@ -1,0 +1,347 @@
+# STATUS: STAGED
+# ACTIVE: false
+# REASON: Flux 与平台组件尚未获准激活
+# ACTIVATION_GATES: bootstrap 最终验证、Flux bootstrap 与 RBAC 独立审阅全部通过
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/part-of: engineering-platform
+    platform.unif.internal/environment: dev
+    platform.unif.internal/availability: non-ha
+  name: cert-manager
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/part-of: engineering-platform
+    platform.unif.internal/environment: dev
+    platform.unif.internal/availability: non-ha
+  name: minio
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/part-of: engineering-platform
+    platform.unif.internal/environment: dev
+    platform.unif.internal/availability: non-ha
+  name: monitoring
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/part-of: engineering-platform
+    platform.unif.internal/environment: dev
+    platform.unif.internal/availability: non-ha
+  name: cnpg-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/part-of: engineering-platform
+    platform.unif.internal/environment: dev
+    platform.unif.internal/availability: non-ha
+  name: platform
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flux-foundation-reconciler
+  namespace: flux-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flux-minio-reconciler
+  namespace: flux-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flux-observability-config-reconciler
+  namespace: flux-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flux-platform-reconciler
+  namespace: flux-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flux-etcd-backup-reconciler
+  namespace: flux-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-manager-helm-reconciler
+  namespace: cert-manager
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: monitoring-helm-reconciler
+  namespace: monitoring
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cnpg-helm-reconciler
+  namespace: cnpg-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: barman-helm-reconciler
+  namespace: cnpg-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: flux-foundation-reconciler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: flux-foundation-reconciler
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cert-manager-helm-reconciler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: cert-manager-helm-reconciler
+    namespace: cert-manager
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: monitoring-helm-reconciler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: monitoring-helm-reconciler
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cnpg-helm-reconciler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: cnpg-helm-reconciler
+    namespace: cnpg-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: barman-helm-reconciler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: barman-helm-reconciler
+    namespace: cnpg-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: flux-namespaced-workload-reconciler
+rules:
+  - apiGroups:
+      - ''
+    resources:
+      - configmaps
+      - persistentvolumeclaims
+      - serviceaccounts
+      - services
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - batch
+    resources:
+      - cronjobs
+      - jobs
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - cert-manager.io
+    resources:
+      - certificates
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - monitoring.coreos.com
+    resources:
+      - podmonitors
+      - prometheusrules
+      - servicemonitors
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - barmancloud.cnpg.io
+    resources:
+      - objectstores
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - postgresql.cnpg.io
+    resources:
+      - clusters
+      - scheduledbackups
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - gateways
+      - httproutes
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-minio-reconciler
+  namespace: minio
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flux-namespaced-workload-reconciler
+subjects:
+  - kind: ServiceAccount
+    name: flux-minio-reconciler
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-observability-config-reconciler
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flux-namespaced-workload-reconciler
+subjects:
+  - kind: ServiceAccount
+    name: flux-observability-config-reconciler
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-platform-reconciler
+  namespace: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+  - kind: ServiceAccount
+    name: flux-platform-reconciler
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-platform-custom-resources-reconciler
+  namespace: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flux-namespaced-workload-reconciler
+subjects:
+  - kind: ServiceAccount
+    name: flux-platform-reconciler
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-etcd-backup-reconciler
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flux-namespaced-workload-reconciler
+subjects:
+  - kind: ServiceAccount
+    name: flux-etcd-backup-reconciler
+    namespace: flux-system

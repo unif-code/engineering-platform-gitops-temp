@@ -67,12 +67,19 @@ regular_archive_member() {
 validate_archive() {
   local name=$1
   local archive=$2
-  local listing verbose_listing member line link_target regular_required
+  local listing verbose_listing verbose_warnings member line link_target regular_required
   local expected_members
   listing=$(tar -tzf "$archive" 2>/dev/null) || return 1
   while IFS= read -r member; do
     safe_archive_member "$member" || return 1
   done <<<"$listing"
+  # GNU tar 在**列表阶段**就把硬链接目标里的前导 `/` 与 `../` 剥掉（实测 1.35：
+  # `bin/../../../etc/passwd`、`/etc/passwd`、`../../etc/passwd` 三者都被打印成
+  # `etc/passwd`），于是下面基于打印值的检查在生产平台上永远判不出逃逸——bsdtar
+  # 原样打印，所以只在 macOS 上有效。tar 净化时会往 stderr 写 "Removing leading …"，
+  # 把该警告本身当作逃逸信号，两个平台就都被覆盖：GNU 靠警告、BSD 靠目标值。
+  verbose_warnings=$(tar -tvzf "$archive" 2>&1 >/dev/null) || return 1
+  [[ "$verbose_warnings" != *'Removing leading'* ]] || return 1
   verbose_listing=$(tar -tvzf "$archive" 2>/dev/null) || return 1
   while IFS= read -r line; do
     if [[ "$line" == l* || "$line" == h* ]]; then

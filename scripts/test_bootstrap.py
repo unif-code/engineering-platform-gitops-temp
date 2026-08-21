@@ -1184,6 +1184,51 @@ class ArchiveLibraryTest(BootstrapTestCase):
             'HARDLINK_ESCAPE_REJECTED\nHARDLINK_INSIDE_ACCEPTED\n',
         )
 
+    def test_hardlink_escape_is_rejected_when_the_lister_sanitizes_it(
+        self,
+    ) -> None:
+        """捕获「守卫只看列表打印值、而列表器已先行净化」导致的失效。
+
+        GNU tar 1.35 在**列表阶段**就剥掉硬链接目标的前导 `/` 与 `../`（容器内实测：
+        `bin/../../../etc/passwd`、`/etc/passwd`、`../../etc/passwd` 三者都打印成
+        `etc/passwd`），只把 "Removing leading …" 写到 stderr。于是基于打印值的
+        safe_symlink_target 在生产平台上永远判不出逃逸——而 bsdtar 原样打印，所以
+        这个缺陷能在 macOS 上完整躲过测试。这里用假 tar 复现 GNU 的行为，让该场景
+        在两个平台都被覆盖。
+        """
+        directory = self.temporary_directory()
+        archive = self.write_archive(
+            directory / 'hardlink-escape.tgz',
+            self.containerd_members()
+            + [('hardlink', 'bin/escape', '../../../etc/passwd')],
+        )
+        fake_bin = directory / 'fake-bin'
+        fake_bin.mkdir()
+        fake_tar = fake_bin / 'tar'
+        fake_tar.write_text(
+            '#!/bin/sh\n'
+            '# 模拟 GNU tar：列表时剥掉硬链接目标的前导 ../ 并把净化写到 stderr。\n'
+            'if [ "$1" = "-tvzf" ] && [ $# -eq 2 ]; then\n'
+            '  /usr/bin/tar "$@" | sed "s# link to \\.\\./.*# link to etc/passwd#"\n'
+            '  if /usr/bin/tar "$@" | grep -q " link to "; then\n'
+            '    printf "tar: Removing leading \\`../../../%s from hard link targets\\n" "\'" >&2\n'
+            '  fi\n'
+            '  exit 0\n'
+            'fi\n'
+            'exec /usr/bin/tar "$@"\n',
+            encoding='utf-8',
+        )
+        fake_tar.chmod(0o755)
+
+        result = self.run_archive(
+            'validate_archive containerd "$1" || echo SANITIZED_ESCAPE_REJECTED\n',
+            str(archive),
+            env={'PATH': f'{fake_bin}:/usr/bin:/bin'},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'SANITIZED_ESCAPE_REJECTED\n')
+
     def test_symlink_entries_and_member_paths_may_not_escape(self) -> None:
         """符号链接目标与成员路径两条老断言都必须保留。"""
         directory = self.temporary_directory()

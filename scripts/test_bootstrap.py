@@ -139,6 +139,13 @@ class BootstrapTestCase(unittest.TestCase):
             name: f'/tmp/unapproved-{name.lower()}' for name in sorted(names)
         }
 
+    # 由 STAGE_SCRIPTS 派生的**相对 bootstrap 目录**路径。迁移后四个 stage 的文件名
+    # 都是 run.sh，只取 name 会让 fixture 把四个写成同一个文件——真实布局是目录区分。
+    stage_paths = {
+        number: path.split('scripts/bootstrap/', 1)[1]
+        for number, path in STAGE_SCRIPTS.items()
+    }
+
     @staticmethod
     def library_source_pattern(library: str) -> str:
         """匹配「source 了某个共享库」，不钉锚点变量名。
@@ -700,7 +707,7 @@ class CommonLibraryTest(BootstrapTestCase):
         # 每一个已跟踪的 bootstrap shell 脚本都交给 shellcheck。写死通配在 stage
         # 迁进子目录后会静默漏检，而漏检不会报错，只会安静地不再守。
         self.assertIn("find \"$repo_root/scripts/bootstrap\"", static)
-        self.assertIn('xargs -0 shellcheck', static)
+        self.assertIn('-exec shellcheck {} +', static)
         covered = sorted(
             path.relative_to(ROOT)
             for path in (ROOT / 'scripts/bootstrap').rglob('*.sh')
@@ -3321,10 +3328,6 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
         'host-config.sh',
         'os-release.sh',
     )
-    # 由 STAGE_SCRIPTS 派生，不再手写第二份。
-    stage_names = {
-        number: Path(path).name for number, path in STAGE_SCRIPTS.items()
-    }
 
     def write_executable(self, path: Path, source: str) -> None:
         path.write_text(textwrap.dedent(source).lstrip(), encoding='utf-8')
@@ -3370,6 +3373,10 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
         source = r'''
             #!/bin/sh
             stage=${0##*/}
+            if [ "$stage" = run.sh ]; then
+              parent=${0%/*}
+              stage=${parent##*/}
+            fi
             stage=${stage%%-*}
             [ "$#" -eq 1 ] || exit 10
             case "$1" in
@@ -3469,8 +3476,10 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
               printf 'EXIT_CODE=10\n'
             fi
         '''
-        for name in self.stage_names.values():
-            self.write_executable(self.stage_dir / name, source)
+        for relative in self.stage_paths.values():
+            target = self.stage_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            self.write_executable(target, source)
 
     def write_fake_library(self) -> None:
         """重建 stage 目录下的被 source 库，用于复原被破坏的 fixture。"""
@@ -4040,7 +4049,7 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
 
         def library_and_stage_unsafe() -> None:
             self.library_dir.chmod(0o777)
-            (self.stage_dir / self.stage_names['00']).chmod(0o777)
+            (self.stage_dir / self.stage_paths['00']).chmod(0o777)
 
         cases = (
             ('world-writable-directory', world_writable_directory),
@@ -14682,10 +14691,14 @@ class FinalVerifyTest(BootstrapTestCase):
     def test_containerd_gate_uses_privileged_child_bash(self) -> None:
         script = FINAL_VERIFY.read_text(encoding='utf-8')
 
+        # 路径由 STAGE_SCRIPTS 派生：stage 迁进 stages/<NN-name>/run.sh 后，写死的
+        # 平铺路径会让这条断言在迁移当次判红，而它要钉的其实是「以特权子 bash、
+        # 清空 BASH_ENV/ENV 的方式调用 containerd stage」这三件事，与布局无关。
+        containerd = self.stage_paths['30']
         self.assertIn(
             "BASH_ENV='' ENV='' PYTHONDONTWRITEBYTECODE=1 "
             "\\\n      /bin/bash -p "
-            '"${script_dir}/30-install-containerd.sh"',
+            f'"${{script_dir}}/{containerd}"',
             script,
         )
 

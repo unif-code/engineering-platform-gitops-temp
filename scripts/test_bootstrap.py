@@ -6818,13 +6818,6 @@ kubernetes-cni'
                 'FAKE_KEY_FINGERPRINT': 'DE15B14486CD377B9E876E1A234654DA9A296436',
             }
         )
-        environment.pop('APT_CONFIG', None)
-        environment.pop('KUBECONFIG', None)
-        environment.pop('GNUPGHOME', None)
-        for variable in (
-            'DPKG_ADMINDIR', 'DPKG_ROOT', 'DPKG_FORCE', 'DPKG_FRONTEND_LOCKED'
-        ):
-            environment.pop(variable, None)
         return environment, host, command_log
 
     def run_stage(
@@ -8994,12 +8987,22 @@ class KubeadmInitTest(BootstrapTestCase):
             printf 'kubectl %s\n' "$*" >>"$FAKE_COMMAND_LOG"
             printf '%s\n' "$FAKE_CANARY" >&2
             case " $* " in
+              *' config view '*)
+                printf '%s' "$FAKE_ADMIN_VIEW_JSON"
+                exit 0
+                ;;
+            esac
+            case " $* " in
               *' get daemonset kube-proxy '*) kind=daemonset ;;
               *' get pods '*) kind=pods ;;
               *' get configmap kube-proxy '*) kind=configmap ;;
               *) exit 64 ;;
             esac
             [ "${FAKE_KUBECTL_FAIL:-}" != "$kind" ] || exit 1
+            if [ "${FAKE_ADMIN_CONF_SWAP:-0}" = 1 ] && [ "$kind" = daemonset ]; then
+              printf 'swapped-during-query\n' >"$FAKE_HOST_ROOT/etc/kubernetes/admin.conf"
+              chmod 0600 "$FAKE_HOST_ROOT/etc/kubernetes/admin.conf"
+            fi
             case "$kind" in
               daemonset) printf '%s' "${FAKE_KUBE_PROXY_DAEMONSET:-}" ;;
               pods) printf '%s' "${FAKE_KUBE_PROXY_PODS:-}" ;;
@@ -9009,12 +9012,6 @@ class KubeadmInitTest(BootstrapTestCase):
         )
 
         environment = self.sanitized_environment()
-        environment.pop('APT_CONFIG', None)
-        environment.pop('KUBECONFIG', None)
-        for variable in (
-            'DPKG_ADMINDIR', 'DPKG_ROOT', 'DPKG_FORCE', 'DPKG_FRONTEND_LOCKED'
-        ):
-            environment.pop(variable, None)
         component_json = (
             '{"containers":['
             '{"metadata":{"name":"kube-apiserver"},"state":"CONTAINER_RUNNING",'
@@ -9043,6 +9040,10 @@ class KubeadmInitTest(BootstrapTestCase):
                 'FAKE_APPROVED_KUBEADM': str(host / 'usr/bin/kubeadm'),
                 'FAKE_DRIFT_DIR': str(drift_dir),
                 'FAKE_CANARY': self.canary,
+                # stage 50 采纳 capture_admin_conf 后会跑一次 `kubectl config view`，
+                # 其输出要过 admin_conf_json_is_exact；载荷复用基类的同一份定义，
+                # 不再另立一份手写 JSON。
+                'FAKE_ADMIN_VIEW_JSON': json.dumps(self.admin_config_object()),
                 'FAKE_LISTENER_MARKER': str(directory / 'listener-6443'),
                 'FAKE_CRICTL_JSON': component_json,
                 'FAKE_KERNEL_GATE_OUTPUT': stage_transcripts['kernel'],
@@ -10586,21 +10587,25 @@ class KubeadmInitTest(BootstrapTestCase):
             commands,
         )
         admin_conf = host / 'etc/kubernetes/admin.conf'
-        self.assertIn(
-            f'kubectl --kubeconfig {admin_conf} --namespace kube-system '
+        # 重锚：kubeconfig 不再是磁盘路径，而是进程替换的 fd——这正是 TOCTOU 加固的
+        # 要点（Stage 90 早已是此形态）。重锚后的断言比原来更强：既钉住三条查询的
+        # 参数逐字不变，也钉住 kubectl 不再从磁盘读 kubeconfig。
+        for query in (
             'get daemonset kube-proxy --ignore-not-found --output=name',
-            commands,
-        )
-        self.assertIn(
-            f'kubectl --kubeconfig {admin_conf} --namespace kube-system '
             'get pods --selector k8s-app=kube-proxy --output=name',
-            commands,
-        )
-        self.assertIn(
-            f'kubectl --kubeconfig {admin_conf} --namespace kube-system '
             'get configmap kube-proxy --ignore-not-found --output=name',
-            commands,
-        )
+        ):
+            with self.subTest(query=query):
+                self.assertTrue(
+                    any(
+                        line.startswith('kubectl --kubeconfig /dev/fd/')
+                        and '--namespace kube-system' in line
+                        and line.endswith(query)
+                        for line in commands
+                    ),
+                    commands,
+                )
+        self.assertNotIn(f'--kubeconfig {admin_conf}', '\n'.join(commands))
         script = KUBEADM_INIT.read_text(encoding='utf-8')
         for forbidden in (
             'kubeadm reset', '--ignore-preflight-errors', '--upload-certs',
@@ -10608,6 +10613,24 @@ class KubeadmInitTest(BootstrapTestCase):
             'kubectl config view --raw',
         ):
             self.assertNotIn(forbidden, script)
+
+    def test_admin_conf_swapped_during_a_query_stops_the_stage(self) -> None:
+        """捕获 Stage 50 在查询期间 admin.conf 被替换却仍判定通过的缺陷。
+
+        改造前 kubectl 直接读磁盘上的 kubeconfig，读取期间被替换不会被发现；改造后
+        它只读已捕获的字节，且每次调用**前后各**校验一次磁盘文件与捕获内容是否仍然
+        一致，于是替换必然被发现并 fail-closed。
+        """
+        environment, _, _ = self.make_environment()
+        environment['FAKE_ADMIN_CONF_SWAP'] = '1'
+
+        result = self.run_stage(environment, '--apply')
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(
+            'REASON=kube-proxy-daemonset-present-or-unreadable', result.stdout
+        )
+        self.assertNotIn('PASS_KUBEADM_INITIALIZED', result.stdout)
 
     def test_post_init_rejects_any_kube_proxy_static_manifest(self) -> None:
         environment, _, _ = self.make_environment()

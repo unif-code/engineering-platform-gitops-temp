@@ -42,6 +42,12 @@ source "${script_dir}/lib/path-facts.sh"
 # shellcheck disable=SC1091
 source "${script_dir}/lib/host-config.sh"
 # shellcheck disable=SC1091
+source "${script_dir}/lib/exec-safety.sh"
+# shellcheck disable=SC1091
+source "${script_dir}/lib/admin-conf.sh"
+# shellcheck disable=SC1091
+source "${script_dir}/lib/kubectl.sh"
+# shellcheck disable=SC1091
 source "${script_dir}/lib/dpkg-package-verification.sh"
 # shellcheck disable=SC1091
 source "${script_dir}/lib/kubelet-default.sh"
@@ -51,6 +57,9 @@ source "${script_dir}/lib/os-release.sh"
 # PHASE 由公共 evidence helper 间接读取。
 # shellcheck disable=SC2034
 readonly PHASE=kubeadm-init
+# admin.conf 的结构校验（lib/admin-conf.sh）经 python_isolated 执行，解释器由
+# 本 stage 钉死绝对路径；缺失时 set -u 报未绑定变量而不会退回 PATH。
+readonly PYTHON_BINARY=/usr/bin/python3
 readonly KUBELET_KEEP_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 readonly KERNEL_TRANSCRIPT=$'PHASE=prepare-kernel\nMODE=CHECK\nRESULT=ALREADY_COMPLIANT\nREASON=kernel-ready\nEVIDENCE=NONE\nEXIT_CODE=0\nNEXT=30-install-containerd\nSHA256=NONE'
 readonly CONTAINERD_TRANSCRIPT=$'PHASE=containerd\nMODE=CHECK\nRESULT=ALREADY_COMPLIANT\nREASON=containerd-ready\nEVIDENCE=NONE\nEXIT_CODE=0\nNEXT=40-install-kubernetes\nSHA256=NONE'
@@ -416,16 +425,6 @@ if sorted(control_plane) != expected:
 ' "$1" >/dev/null 2>&1
 }
 
-kubectl_query_is_empty() {
-  local captured
-  captured=$(
-    set +e
-    "$kubectl_binary" --kubeconfig "$admin_conf" --namespace kube-system "$@" 2>/dev/null
-    printf '__EXIT_CODE__=%s\n' "$?"
-  )
-  [[ "$captured" == '__EXIT_CODE__=0' ]]
-}
-
 initialized_control_plane_gate() {
   local failure_result=$1 failure_code=$2 runtime_set_mode=$3 listener kubernetes_root
   local expected_manifests_with_keep
@@ -447,12 +446,13 @@ initialized_control_plane_gate() {
   package_directory_is_safe /etc/kubernetes "$kubernetes_root" 755 ||
     complete "$failure_result" kubernetes-root-metadata-drift \
       "$failure_code" NONE
+  # 由 lib/kubectl.sh 消费（source 路径含变量，shellcheck 无法跟随）。
+  # shellcheck disable=SC2034
   admin_conf=$(host_path /etc/kubernetes/admin.conf)
   etcd_member=$(host_path /var/lib/etcd/member)
 
-  if [[ ! -f "$admin_conf" || -L "$admin_conf" || "$(path_mode "$admin_conf")" != 600 ]] || ! owned_by_expected "$admin_conf"; then
+  admin_conf_metadata_is_safe ||
     complete "$failure_result" admin-conf-metadata-drift "$failure_code" NONE
-  fi
   manifest_dir=$(host_path /etc/kubernetes/manifests)
   package_directory_is_safe /etc/kubernetes/manifests "$manifest_dir" 700 ||
     complete "$failure_result" static-manifest-directory-metadata-drift \
@@ -500,11 +500,16 @@ initialized_control_plane_gate() {
     complete "$failure_result" control-plane-runtime-set-drift "$failure_code" NONE
   fi
 
-  kubectl_query_is_empty get daemonset kube-proxy --ignore-not-found --output=name ||
+  # 先把 admin.conf 捕获下来并校验结构，之后所有 kubectl 都只读这份已校验的字节。
+  # 直接把磁盘路径交给 kubectl，读取期间文件被替换不会被发现（Stage 90 早已是这个
+  # 形态，Stage 50 此前不是）。namespace 由调用方显式传入，不再由谓词硬编码。
+  capture_admin_conf ||
+    complete "$failure_result" admin-conf-content-or-structure-drift "$failure_code" NONE
+  kubectl_query_is_empty --namespace kube-system get daemonset kube-proxy --ignore-not-found --output=name ||
     complete "$failure_result" kube-proxy-daemonset-present-or-unreadable "$failure_code" NONE
-  kubectl_query_is_empty get pods --selector k8s-app=kube-proxy --output=name ||
+  kubectl_query_is_empty --namespace kube-system get pods --selector k8s-app=kube-proxy --output=name ||
     complete "$failure_result" kube-proxy-pods-present-or-unreadable "$failure_code" NONE
-  kubectl_query_is_empty get configmap kube-proxy --ignore-not-found --output=name ||
+  kubectl_query_is_empty --namespace kube-system get configmap kube-proxy --ignore-not-found --output=name ||
     complete "$failure_result" kube-proxy-configmap-present-or-unreadable "$failure_code" NONE
 
   certificate=$(host_path /etc/kubernetes/pki/apiserver.crt)
@@ -532,6 +537,7 @@ for required_command in awk cat date dpkg dpkg-query find grep hostname id insta
   fi
   require_command "$required_command" || complete STOP_PRECONDITION "missing-command-${required_command}" "$EXIT_PRECONDITION" NONE
 done
+[[ -x "$PYTHON_BINARY" ]] || complete STOP_PRECONDITION missing-command-python3 "$EXIT_PRECONDITION" NONE
 
 # 主机身份与 config digest 唯一来源：bootstrap/hosts/<hostname>/。
 # 顺序固定：parse_mode → require_root → required_command（含 hostname）→ load_host_config → host_pin。

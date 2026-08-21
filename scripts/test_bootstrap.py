@@ -24,14 +24,27 @@ ARCHIVE_LIB = ROOT / 'scripts/bootstrap/lib/archive.sh'
 KUBECTL_LIB = ROOT / 'scripts/bootstrap/lib/kubectl.sh'
 HELM_LIB = ROOT / 'scripts/bootstrap/lib/helm.sh'
 CIDR_CHECK = ROOT / 'scripts/bootstrap/check_cidrs.py'
-PREFLIGHT = ROOT / 'scripts/bootstrap/00-preflight.sh'
-STAGE_ARTIFACTS = ROOT / 'scripts/bootstrap/10-stage-artifacts.sh'
-PREPARE_KERNEL = ROOT / 'scripts/bootstrap/20-prepare-kernel.sh'
-INSTALL_CONTAINERD = ROOT / 'scripts/bootstrap/30-install-containerd.sh'
-INSTALL_KUBERNETES = ROOT / 'scripts/bootstrap/40-install-kubernetes.sh'
-KUBEADM_INIT = ROOT / 'scripts/bootstrap/50-kubeadm-init.sh'
-INSTALL_CILIUM = ROOT / 'scripts/bootstrap/60-install-cilium.sh'
-FINAL_VERIFY = ROOT / 'scripts/bootstrap/90-verify.sh'
+# stage 路径的**唯一来源**。迁移到 stages/<NN-name>/run.sh 时只改这张表；
+# 下面的常量、stage_names 与 stage_script() 全部由它派生，散落的字面量由
+# test_stage_paths_come_from_one_table 挡住。
+STAGE_SCRIPTS = {
+    '00': 'scripts/bootstrap/00-preflight.sh',
+    '10': 'scripts/bootstrap/10-stage-artifacts.sh',
+    '20': 'scripts/bootstrap/20-prepare-kernel.sh',
+    '30': 'scripts/bootstrap/30-install-containerd.sh',
+    '40': 'scripts/bootstrap/40-install-kubernetes.sh',
+    '50': 'scripts/bootstrap/50-kubeadm-init.sh',
+    '60': 'scripts/bootstrap/60-install-cilium.sh',
+    '90': 'scripts/bootstrap/90-verify.sh',
+}
+PREFLIGHT = ROOT / STAGE_SCRIPTS['00']
+STAGE_ARTIFACTS = ROOT / STAGE_SCRIPTS['10']
+PREPARE_KERNEL = ROOT / STAGE_SCRIPTS['20']
+INSTALL_CONTAINERD = ROOT / STAGE_SCRIPTS['30']
+INSTALL_KUBERNETES = ROOT / STAGE_SCRIPTS['40']
+KUBEADM_INIT = ROOT / STAGE_SCRIPTS['50']
+INSTALL_CILIUM = ROOT / STAGE_SCRIPTS['60']
+FINAL_VERIFY = ROOT / STAGE_SCRIPTS['90']
 BOOTSTRAP_ALL = ROOT / 'scripts/bootstrap/bootstrap-all.sh'
 RUN_APPROVED = ROOT / 'scripts/bootstrap/run-approved.sh'
 
@@ -125,6 +138,11 @@ class BootstrapTestCase(unittest.TestCase):
         return {
             name: f'/tmp/unapproved-{name.lower()}' for name in sorted(names)
         }
+
+    @staticmethod
+    def stage_script(stage: str) -> Path:
+        """按编号取 stage 脚本路径；迁移目录时只有 STAGE_SCRIPTS 需要改。"""
+        return ROOT / STAGE_SCRIPTS[stage]
 
     def temporary_directory(self) -> Path:
         directory = tempfile.TemporaryDirectory()
@@ -536,6 +554,35 @@ class CommonLibraryTest(BootstrapTestCase):
 
         self.assertEqual(result.returncode, 30)
         self.assertEqual(evidence.read_text(encoding='utf-8'), 'preserve\n')
+
+    def test_stage_paths_come_from_one_table(self) -> None:
+        """stage 路径必须只有 STAGE_SCRIPTS 一个来源。
+
+        目录迁移（stages/<NN-name>/run.sh）时，散落在别处的路径字面量会被漏改，
+        而漏改的症状往往是「枚举型断言静默通过 0 个文件」——恒绿而非判红。
+        """
+        self.assertEqual(
+            sorted(STAGE_SCRIPTS),
+            ['00', '10', '20', '30', '40', '50', '60', '90'],
+        )
+        for number in STAGE_SCRIPTS:
+            with self.subTest(stage=number):
+                path = self.stage_script(number)
+                self.assertTrue(path.is_file(), path)
+                self.assertFalse(path.is_symlink(), path)
+                self.assertTrue(os.access(path, os.X_OK), path)
+
+        source = (ROOT / 'scripts/test_bootstrap.py').read_text(encoding='utf-8')
+        lines = source.splitlines()
+        start = lines.index('STAGE_SCRIPTS = {')
+        end = next(i for i in range(start, len(lines)) if lines[i] == '}')
+        pattern = re.compile(r'bootstrap/[0-9]{2}-')
+        offenders = [
+            number
+            for number, line in enumerate(lines, 1)
+            if pattern.search(line) and not start < number - 1 < end
+        ]
+        self.assertEqual(offenders, [], '这些行绕过了 STAGE_SCRIPTS 表')
 
     def test_every_stage_delegates_host_path_and_complete(self) -> None:
         """八个 stage 曾各留一份 host_path 与 complete，必须只保留共享库那一份。
@@ -3223,15 +3270,9 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
         'host-config.sh',
         'os-release.sh',
     )
+    # 由 STAGE_SCRIPTS 派生，不再手写第二份。
     stage_names = {
-        '00': '00-preflight.sh',
-        '10': '10-stage-artifacts.sh',
-        '20': '20-prepare-kernel.sh',
-        '30': '30-install-containerd.sh',
-        '40': '40-install-kubernetes.sh',
-        '50': '50-kubeadm-init.sh',
-        '60': '60-install-cilium.sh',
-        '90': '90-verify.sh',
+        number: Path(path).name for number, path in STAGE_SCRIPTS.items()
     }
 
     def write_executable(self, path: Path, source: str) -> None:
@@ -3948,7 +3989,7 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
 
         def library_and_stage_unsafe() -> None:
             self.library_dir.chmod(0o777)
-            (self.stage_dir / '00-preflight.sh').chmod(0o777)
+            (self.stage_dir / self.stage_names['00']).chmod(0o777)
 
         cases = (
             ('world-writable-directory', world_writable_directory),

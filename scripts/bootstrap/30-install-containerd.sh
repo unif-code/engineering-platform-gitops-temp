@@ -37,24 +37,6 @@ readonly ARTIFACT_SET=pcs-2026-08-10.1
 readonly APPROVED_RECORD_COUNT=6
 readonly CRI_ENDPOINT=unix:///run/containerd/containerd.sock
 
-host_path() {
-  local absolute=$1
-  if [[ "${BOOTSTRAP_TEST_MODE:-0}" == 1 ]]; then
-    printf '%s%s\n' "${BOOTSTRAP_TEST_ROOT:?}" "$absolute"
-  else
-    printf '%s\n' "$absolute"
-  fi
-}
-
-complete() {
-  local result=$1
-  local reason=$2
-  local code=$3
-  local next=$4
-  finish_phase "$result" "$reason" "$code" "$next"
-  exit "$code"
-}
-
 stream_sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum | awk '{print $1}'

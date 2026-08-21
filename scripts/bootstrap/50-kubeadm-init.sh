@@ -65,21 +65,6 @@ readonly KERNEL_TRANSCRIPT=$'PHASE=prepare-kernel\nMODE=CHECK\nRESULT=ALREADY_CO
 readonly CONTAINERD_TRANSCRIPT=$'PHASE=containerd\nMODE=CHECK\nRESULT=ALREADY_COMPLIANT\nREASON=containerd-ready\nEVIDENCE=NONE\nEXIT_CODE=0\nNEXT=40-install-kubernetes\nSHA256=NONE'
 readonly KUBERNETES_TRANSCRIPT=$'PHASE=install-kubernetes\nMODE=CHECK\nRESULT=ALREADY_COMPLIANT\nREASON=kubernetes-packages-ready\nEVIDENCE=NONE\nEXIT_CODE=0\nNEXT=50-kubeadm-init.sh --check\nSHA256=NONE'
 
-host_path() {
-  local absolute=$1
-  if [[ "${BOOTSTRAP_TEST_MODE:-0}" == 1 ]]; then
-    printf '%s%s\n' "${BOOTSTRAP_TEST_ROOT:?}" "$absolute"
-  else
-    printf '%s\n' "$absolute"
-  fi
-}
-
-complete() {
-  local result=$1 reason=$2 code=$3 next=$4
-  finish_phase "$result" "$reason" "$code" "$next"
-  exit "$code"
-}
-
 safe_test_gate() {
   local path=$1
   [[ "$path" == /* && -f "$path" && ! -L "$path" && -x "$path" && -O "$path" ]]

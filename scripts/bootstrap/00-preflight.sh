@@ -17,24 +17,6 @@ source "${script_dir}/lib/os-release.sh"
 readonly PHASE=preflight
 readonly CLEANUP_EVIDENCE_SHA256=a68a3d2ff340bcdcb4265853107a3a2c22a9f7328728473d81d9be2d1486e635
 
-host_path() {
-  local absolute=$1
-  if [[ "${BOOTSTRAP_TEST_MODE:-0}" == "1" ]]; then
-    printf '%s%s\n' "${BOOTSTRAP_TEST_ROOT:?}" "$absolute"
-  else
-    printf '%s\n' "$absolute"
-  fi
-}
-
-complete() {
-  local result=$1
-  local reason=$2
-  local code=$3
-  local next=$4
-  finish_phase "$result" "$reason" "$code" "$next"
-  exit "$code"
-}
-
 parse_mode "$@" || exit "$?"
 if [[ "$MODE" != CHECK ]]; then
   printf 'RESULT=STOP_MODE\nREASON=preflight-is-read-only\n' >&2

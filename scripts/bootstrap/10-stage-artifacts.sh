@@ -13,30 +13,9 @@ source "${script_dir}/lib/archive.sh"
 readonly ARTIFACT_SET=pcs-2026-08-10.1
 readonly MINIMUM_AVAILABLE_KIB=1048576
 readonly APPROVED_RECORD_COUNT=6
+# PHASE 由公共 evidence helper 间接读取。
+# shellcheck disable=SC2034
 readonly PHASE=stage-artifacts
-
-host_path() {
-  local absolute=$1
-  if [[ "${BOOTSTRAP_TEST_MODE:-0}" == 1 ]]; then
-    printf '%s%s\n' "${BOOTSTRAP_TEST_ROOT:?}" "$absolute"
-  else
-    printf '%s\n' "$absolute"
-  fi
-}
-
-complete() {
-  local result=$1
-  local reason=$2
-  local code=$3
-  local next=${4:-NONE}
-  # MODE 由公共 parse_mode helper 间接赋值。
-  # shellcheck disable=SC2153
-  printf 'PHASE=%s\nMODE=%s\nRESULT=%s\nREASON=%s\n' \
-    "$PHASE" "$MODE" "$result" "$reason"
-  printf 'EVIDENCE=NONE\nEXIT_CODE=%s\nNEXT=%s\nSHA256=NONE\n' \
-    "$code" "$next"
-  exit "$code"
-}
 
 is_official_url() {
   local url=$1

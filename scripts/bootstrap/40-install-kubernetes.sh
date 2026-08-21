@@ -58,21 +58,6 @@ readonly SOURCE_CONTENT='deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring
 readonly -a PACKAGES=(kubeadm kubectl kubelet kubernetes-cni)
 readonly -a BASE_DEPENDENCIES=(iptables mount util-linux libc6)
 
-host_path() {
-  local absolute=$1
-  if [[ "${BOOTSTRAP_TEST_MODE:-0}" == 1 ]]; then
-    printf '%s%s\n' "${BOOTSTRAP_TEST_ROOT:?}" "$absolute"
-  else
-    printf '%s\n' "$absolute"
-  fi
-}
-
-complete() {
-  local result=$1 reason=$2 code=$3 next=$4
-  finish_phase "$result" "$reason" "$code" "$next"
-  exit "$code"
-}
-
 managed_parent_safe() {
   [[ -d "$1" && ! -L "$1" && "$(path_mode "$1")" == 755 ]] && owned_by_expected "$1"
 }

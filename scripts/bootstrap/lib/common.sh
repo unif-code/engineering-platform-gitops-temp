@@ -180,3 +180,24 @@ finish_phase() {
     printf 'SHA256=NONE\n'
   fi
 }
+
+# 8 个 stage 曾各留一份。host_path 有两种写法（00 用 == "1"，其余用 == 1），在 [[ ]]
+# 内语义相同，取多数版本。complete 有四种形态：00/20/30 与 40/50/60/90 只差 local 的
+# 写法、都委托 finish_phase；**stage 10 是唯一不委托的**，它内联打印并硬编码
+# EVIDENCE=NONE / SHA256=NONE。已核实 stage 10 从不调用 open_evidence，而
+# finish_phase 在未开证据文件时输出的字段与顺序与那份内联版本逐字段一致，因此统一为
+# 委托不改变任何一个 stage 的输出。next 取 10 的 ${4:-NONE}（更宽松，其余七个总是传参）。
+host_path() {
+  local absolute=$1
+  if [[ "${BOOTSTRAP_TEST_MODE:-0}" == 1 ]]; then
+    printf '%s%s\n' "${BOOTSTRAP_TEST_ROOT:?}" "$absolute"
+  else
+    printf '%s\n' "$absolute"
+  fi
+}
+
+complete() {
+  local result=$1 reason=$2 code=$3 next=${4:-NONE}
+  finish_phase "$result" "$reason" "$code" "$next"
+  exit "$code"
+}

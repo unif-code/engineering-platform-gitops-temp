@@ -93,21 +93,6 @@ readonly -a GATEWAY_OBJECTS=(
   validatingadmissionpolicybinding.admissionregistration.k8s.io/safe-upgrades.gateway.networking.k8s.io
 )
 
-host_path() {
-  local absolute=$1
-  if [[ "${BOOTSTRAP_TEST_MODE:-0}" == 1 ]]; then
-    printf '%s%s\n' "${BOOTSTRAP_TEST_ROOT:?}" "$absolute"
-  else
-    printf '%s\n' "$absolute"
-  fi
-}
-
-complete() {
-  local result=$1 reason=$2 code=$3 next=$4
-  finish_phase "$result" "$reason" "$code" "$next"
-  exit "$code"
-}
-
 safe_file_with_digest() {
   local path=$1 expected_mode=$2 expected_digest=$3 digest
   [[ -f "$path" && ! -L "$path" && "$(path_mode "$path")" == "$expected_mode" ]] || return 1

@@ -33,24 +33,6 @@ readonly PHASE=prepare-kernel
 readonly MODULES_CONTENT=$'overlay\nbr_netfilter\n'
 readonly SYSCTL_CONTENT=$'net.bridge.bridge-nf-call-iptables = 1\nnet.bridge.bridge-nf-call-ip6tables = 1\nnet.ipv4.ip_forward = 1\n'
 
-host_path() {
-  local absolute=$1
-  if [[ "${BOOTSTRAP_TEST_MODE:-0}" == 1 ]]; then
-    printf '%s%s\n' "${BOOTSTRAP_TEST_ROOT:?}" "$absolute"
-  else
-    printf '%s\n' "$absolute"
-  fi
-}
-
-complete() {
-  local result=$1
-  local reason=$2
-  local code=$3
-  local next=$4
-  finish_phase "$result" "$reason" "$code" "$next"
-  exit "$code"
-}
-
 require_managed_parent() {
   local parent=$1
   local mode

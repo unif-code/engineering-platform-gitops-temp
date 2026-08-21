@@ -537,6 +537,33 @@ class CommonLibraryTest(BootstrapTestCase):
         self.assertEqual(result.returncode, 30)
         self.assertEqual(evidence.read_text(encoding='utf-8'), 'preserve\n')
 
+    def test_every_stage_delegates_host_path_and_complete(self) -> None:
+        """八个 stage 曾各留一份 host_path 与 complete，必须只保留共享库那一份。
+
+        complete 有四种形态，其中 **stage 10 是唯一不委托 finish_phase 的**：它内联
+        打印并硬编码 EVIDENCE=NONE / SHA256=NONE。统一为委托的前提已核实——stage 10
+        从不调用 open_evidence，而 finish_phase 在未开证据文件时输出的字段与顺序和那份
+        内联版本逐字段一致，因此统一不改变任何一个 stage 的输出（由各 stage 既有的
+        完成块断言继续把关）。
+        """
+        shared = COMMON.read_text(encoding='utf-8')
+        for declaration in ('host_path()', 'complete()'):
+            self.assertEqual(shared.count(declaration), 1, declaration)
+        # next 取更宽松的默认值，其余七个 stage 总是传参，不受影响。
+        self.assertIn('local result=$1 reason=$2 code=$3 next=${4:-NONE}', shared)
+        self.assertIn('finish_phase "$result" "$reason" "$code" "$next"', shared)
+
+        stages = sorted(BOOTSTRAP_ALL.parent.glob('[0-9]*.sh'))
+        self.assertEqual(len(stages), 8, [s.name for s in stages])
+        for stage in stages:
+            with self.subTest(stage=stage.name):
+                body = stage.read_text(encoding='utf-8')
+                for declaration in ('host_path()', 'complete()'):
+                    self.assertNotIn(declaration + ' {', body, declaration)
+                self.assertIn('source "${script_dir}/lib/common.sh"', body)
+                # 内联版本独有的硬编码字段不得残留在任何 stage 里。
+                self.assertNotIn("printf 'EVIDENCE=NONE\\n", body)
+
     def test_kubernetes_stages_share_kubelet_default_validator(self) -> None:
         shared = ROOT / 'scripts/bootstrap/lib/kubelet-default.sh'
         self.assertTrue(shared.is_file(), 'shared kubelet validator is missing')
@@ -1531,7 +1558,10 @@ class HelmLibraryTest(BootstrapTestCase):
             '#!/bin/sh\n'
             'kubeconfig=$2\n'
             'dir=$(dirname "$kubeconfig")\n'
-            'mode() { stat -f "%Lp" "$1" 2>/dev/null || stat -c "%a" "$1"; }\n'
+            # GNU 在前、BSD 在后，与 lib/path-facts.sh 的 path_mode 同序。
+            # 反过来写会在 Linux 上静默出错：GNU 的 -f 是「显示文件系统状态」
+            # 且返回 0，`||` 的回退永远走不到，于是吐出一堆文件系统信息。
+            'mode() { stat -c "%a" "$1" 2>/dev/null || stat -f "%Lp" "$1"; }\n'
             'printf "KUBECONFIG_DIR_MODE=%s\\n" "$(mode "$dir")"\n'
             'printf "KUBECONFIG_FILE_MODE=%s\\n" "$(mode "$kubeconfig")"\n'
             'printf "KUBECONFIG_CONTENT=%s\\n" "$(cat "$kubeconfig")"\n',

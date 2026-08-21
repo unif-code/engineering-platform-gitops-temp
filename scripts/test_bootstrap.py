@@ -3348,6 +3348,11 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
         self.lock_dir.chmod(0o1777)
         self.lock_file = self.lock_dir / 'bootstrap.lock'
         self.command_log.write_text('', encoding='utf-8')
+        # 真实 bootstrap 目录里有 check_cidrs.py，且它被 stage 以 root 执行，因此在
+        # 门禁覆盖范围内；fixture 必须同构，否则门禁会因文件缺失而对所有用例判死。
+        cidr = self.stage_dir / 'check_cidrs.py'
+        cidr.write_text('#!/usr/bin/env python3\n', encoding='utf-8')
+        cidr.chmod(0o644)
         self.write_fake_stages()
         self.write_fake_library()
         self.write_fake_commands()
@@ -3476,6 +3481,14 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
               printf 'EXIT_CODE=10\n'
             fi
         '''
+        # 整棵重建：目录级篡改（chmod/符号链接/多塞条目）不是重写文件能撤销的，
+        # 留到下一个子用例就会让它误判——门禁会先在残留的坏目录上判死。
+        stages_root = self.stage_dir / 'stages'
+        if stages_root.is_symlink() or stages_root.is_file():
+            stages_root.unlink()
+        elif stages_root.is_dir():
+            shutil.rmtree(stages_root)
+        stages_root.mkdir(mode=0o755)
         for relative in self.stage_paths.values():
             target = self.stage_dir / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -4003,6 +4016,90 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
 
         self.assertEqual(result.returncode, 10)
         self.assertIn('REASON=unsafe-repository-path', result.stdout)
+
+    def test_stage_directories_and_executed_files_are_gated(self) -> None:
+        """stages/ 三层与被 root 执行的 check_cidrs.py 都必须先过门禁。
+
+        stage 迁进目录后，被 root 触碰的不再只有一个文件：stages/ 本身、每个 stage
+        目录、目录里的**每个条目**（run.sh、gates.sh、README.md 及任何新增文件），
+        以及 stage 以 root 执行的 check_cidrs.py（账本 R3 从 Task 1 下沉至此）。
+        """
+        stages_root = self.stage_dir / 'stages'
+        stage_home = self.stage_dir / self.stage_paths['00']
+        stage_home = stage_home.parent
+        cidr = self.stage_dir / 'check_cidrs.py'
+
+        def world_writable_stages_root() -> None:
+            stages_root.chmod(0o777)
+
+        def group_writable_stage_directory() -> None:
+            stage_home.chmod(0o770)
+
+        def symlinked_stage_directory() -> None:
+            relocated = self.fixture_root / 'relocated-stage'
+            shutil.move(str(stage_home), str(relocated))
+            stage_home.symlink_to(relocated, target_is_directory=True)
+
+        def world_writable_sibling_entry() -> None:
+            # gates.sh / README.md 这类非 run.sh 条目同样在 root 的读取路径上。
+            sibling = stage_home / 'gates.sh'
+            sibling.write_text('# gates\n', encoding='utf-8')
+            sibling.chmod(0o666)
+
+        def world_writable_dotfile_entry() -> None:
+            hidden = stage_home / '.hidden.sh'
+            hidden.write_text('# hidden\n', encoding='utf-8')
+            hidden.chmod(0o666)
+
+        def nested_directory_entry() -> None:
+            (stage_home / 'nested').mkdir(mode=0o700)
+
+        def world_writable_cidr_script() -> None:
+            cidr.chmod(0o666)
+
+        def symlinked_cidr_script() -> None:
+            planted = self.fixture_root / 'planted-cidr.py'
+            planted.write_text('# planted\n', encoding='utf-8')
+            planted.chmod(0o644)
+            cidr.unlink()
+            cidr.symlink_to(planted)
+
+        def missing_cidr_script() -> None:
+            cidr.unlink()
+
+        cases = (
+            ('world-writable-stages-root', world_writable_stages_root, 'unsafe-stage-file'),
+            ('group-writable-stage-directory', group_writable_stage_directory, 'unsafe-stage-file'),
+            ('symlinked-stage-directory', symlinked_stage_directory, 'unsafe-stage-file'),
+            ('world-writable-sibling-entry', world_writable_sibling_entry, 'unsafe-stage-file'),
+            ('world-writable-dotfile-entry', world_writable_dotfile_entry, 'unsafe-stage-file'),
+            ('nested-directory-entry', nested_directory_entry, 'unsafe-stage-file'),
+            ('world-writable-cidr-script', world_writable_cidr_script, 'unsafe-executed-file'),
+            ('symlinked-cidr-script', symlinked_cidr_script, 'unsafe-executed-file'),
+            ('missing-cidr-script', missing_cidr_script, 'unsafe-executed-file'),
+        )
+        for label, tamper, reason in cases:
+            with self.subTest(case=label):
+                self.reset_fixture()
+                tamper()
+                try:
+                    result = self.run_orchestrator('--check')
+                finally:
+                    self.write_fake_library()
+                    self.write_fake_stages()
+                    if cidr.is_symlink() or cidr.exists():
+                        cidr.unlink()
+                    cidr.write_text(
+                        '#!/usr/bin/env python3\n', encoding='utf-8'
+                    )
+                    cidr.chmod(0o644)
+
+                self.assertEqual(result.returncode, 30, result.stdout)
+                self.assertIn(f'REASON={reason}', result.stdout)
+                # 必须停在任何 stage 之前：编排器自身的 PHASE=bootstrap-all 是正常的，
+                # 但只要出现 stage 的 PHASE，就说明已经以 root 执行过东西了。
+                self.assertIn('PHASE=bootstrap-all', result.stdout)
+                self.assertNotIn('PHASE=preflight', result.stdout)
 
     def test_library_files_are_gated_before_any_stage_runs(self) -> None:
         """每个 stage 都以 root source lib/*.sh，属主与权限必须先过门禁。"""

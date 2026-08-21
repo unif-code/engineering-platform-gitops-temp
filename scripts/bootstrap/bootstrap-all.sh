@@ -400,12 +400,36 @@ shopt -u dotglob nullglob
 (( library_file_count > 0 )) || stop_orchestrator unsafe-library-file 30
 readonly library_dir
 
+# stage 迁进 stages/<NN-name>/ 后，被 root 执行的东西不再只有一个文件：stages/ 本身、
+# 每个 stage 目录，以及目录里的每个条目（run.sh、gates.sh、README.md 及任何新增文件）
+# 都在 root 的读写路径上。按 lib/ 门禁的同一原则——覆盖**每个条目**而不只是 *.sh，
+# 否则 .hidden.sh 之类的点文件可以绕过。
+stages_root="${stage_dir}/stages"
+safe_owned_directory "$stages_root" "$expected_stage_uid" ||
+  stop_orchestrator unsafe-stage-file 30
+readonly stages_root
+
+# check_cidrs.py 由 stage 00 与 50 以 root 执行，逃逸面与被 source 的库同级。
+cidr_script="${stage_dir}/check_cidrs.py"
+safe_owned_file "$cidr_script" "$expected_stage_uid" ||
+  stop_orchestrator unsafe-executed-file 30
+readonly cidr_script
+
 for stage in "${STAGES[@]}"; do
   stage_script=$(stage_path "$stage") || stop_orchestrator invalid-stage-map 30
-  if ! safe_owned_file "$stage_script" "$expected_stage_uid" ||
-     [[ ! -x "$stage_script" ]]; then
+  stage_home=${stage_script%/*}
+  safe_owned_directory "$stage_home" "$expected_stage_uid" ||
     stop_orchestrator unsafe-stage-file 30
-  fi
+  stage_entry_count=0
+  shopt -s dotglob nullglob
+  for stage_entry in "$stage_home"/*; do
+    stage_entry_count=$((stage_entry_count + 1))
+    safe_owned_file "$stage_entry" "$expected_stage_uid" ||
+      stop_orchestrator unsafe-stage-file 30
+  done
+  shopt -u dotglob nullglob
+  (( stage_entry_count > 0 )) || stop_orchestrator unsafe-stage-file 30
+  [[ -x "$stage_script" ]] || stop_orchestrator unsafe-stage-file 30
 done
 
 git_commit=$("$git_binary" -C "$repo_root" rev-parse HEAD 2>/dev/null) ||

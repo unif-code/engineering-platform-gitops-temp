@@ -11247,7 +11247,7 @@ operator:
                 ;;
               values.yaml)
                 key=values
-                digest=5f598e99defc07a32a1b944ad749baf0e66b2b2437dbe0ab995c323f71cdd887
+                digest=5f598e99c515d0ccca7efdd6069ea515142615520a02e6c4e0b5cba1bf011d8a
                 ;;
               *) exec /usr/bin/shasum -a 256 "$path" ;;
             esac

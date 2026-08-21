@@ -22,6 +22,7 @@ PATH_FACTS = ROOT / 'scripts/bootstrap/lib/path-facts.sh'
 EXEC_SAFETY = ROOT / 'scripts/bootstrap/lib/exec-safety.sh'
 ARCHIVE_LIB = ROOT / 'scripts/bootstrap/lib/archive.sh'
 KUBECTL_LIB = ROOT / 'scripts/bootstrap/lib/kubectl.sh'
+HELM_LIB = ROOT / 'scripts/bootstrap/lib/helm.sh'
 CIDR_CHECK = ROOT / 'scripts/bootstrap/check_cidrs.py'
 PREFLIGHT = ROOT / 'scripts/bootstrap/00-preflight.sh'
 STAGE_ARTIFACTS = ROOT / 'scripts/bootstrap/10-stage-artifacts.sh'
@@ -1500,6 +1501,119 @@ class KubectlLibraryTest(BootstrapTestCase):
         self.assertIn('--kubeconfig <(printf', run_body)
         self.assertNotIn('--kubeconfig "$admin_conf"', run_body)
         self.assertEqual(run_body.count('admin_conf_is_safe || return 1'), 2)
+
+
+class HelmLibraryTest(BootstrapTestCase):
+    """lib/helm.sh：helm 调用与瞬态 kubeconfig 的生命周期。
+
+    该临时文件是 `--check` 零写入原则唯一文档化的例外，所以它的四条性质——目录 700、
+    文件 600、内容与 ADMIN_CONF_CONTENT 逐字节一致、退出时必被清理——都要有断言。
+    """
+
+    STAGES = (INSTALL_CILIUM, FINAL_VERIFY)
+    DECLARATIONS = (
+        'helm_run()',
+        'cleanup_helm_kubeconfig()',
+        'helm_cluster_run()',
+        'helm_kubeconfig_residue_exists()',
+        'helm_values_json_is_exact()',
+        'helm_archive_is_safe()',
+    )
+
+    def test_transient_kubeconfig_is_locked_down_and_always_removed(self) -> None:
+        """目录 700、文件 600、内容逐字节一致，且函数返回后不留残留。"""
+        directory = self.temporary_directory()
+        root = directory / 'root'
+        root.mkdir()
+        root.chmod(0o700)
+        fake_helm = directory / 'fake-helm'
+        fake_helm.write_text(
+            '#!/bin/sh\n'
+            'kubeconfig=$2\n'
+            'dir=$(dirname "$kubeconfig")\n'
+            'mode() { stat -f "%Lp" "$1" 2>/dev/null || stat -c "%a" "$1"; }\n'
+            'printf "KUBECONFIG_DIR_MODE=%s\\n" "$(mode "$dir")"\n'
+            'printf "KUBECONFIG_FILE_MODE=%s\\n" "$(mode "$kubeconfig")"\n'
+            'printf "KUBECONFIG_CONTENT=%s\\n" "$(cat "$kubeconfig")"\n',
+            encoding='utf-8',
+        )
+        fake_helm.chmod(0o755)
+
+        body = (
+            'umask 077\n'
+            'admin_conf_is_safe() { return 0; }\n'
+            f'host_path() {{ printf "%s%s\\n" "{directory}" "$1"; }}\n'
+            'ADMIN_CONF_CONTENT=fake-kubeconfig-bytes\n'
+            f'helm_binary={fake_helm}\n'
+            'helm_cluster_run version --short || echo CLUSTER_RUN_REJECTED\n'
+            'helm_kubeconfig_residue_exists && echo RESIDUE_LEFT || echo RESIDUE_CLEAN\n'
+        )
+        result = self.run_command(
+            ['/bin/bash', '-c', f'set -u\nsource "$0"\n{body}',
+             str(HELM_LIB)],
+            env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
+                 'BOOTSTRAP_TEST_MODE': '1'},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('CLUSTER_RUN_REJECTED', result.stdout)
+        self.assertIn('KUBECONFIG_DIR_MODE=700', result.stdout)
+        self.assertIn('KUBECONFIG_FILE_MODE=600', result.stdout)
+        self.assertIn('KUBECONFIG_CONTENT=fake-kubeconfig-bytes', result.stdout)
+        self.assertIn('RESIDUE_CLEAN', result.stdout)
+        self.assertEqual(list(root.iterdir()), [], '瞬态目录必须被清掉')
+
+        # 同一段逻辑在 umask 放宽时必须判否——否则 kubeconfig 会以 644 落盘。
+        # 没有这一问，safe_file 那一项被拿掉也不会有任何用例变红。
+        loose = self.run_command(
+            ['/bin/bash', '-c',
+             f'set -u\nsource "$0"\n{body.replace("umask 077", "umask 022")}',
+             str(HELM_LIB)],
+            env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
+                 'BOOTSTRAP_TEST_MODE': '1'},
+        )
+
+        self.assertIn('CLUSTER_RUN_REJECTED', loose.stdout)
+        self.assertNotIn('KUBECONFIG_FILE_MODE', loose.stdout)
+        self.assertEqual(list(root.iterdir()), [], '判否路径同样不得留残留')
+
+    def test_both_consuming_stages_delegate_to_the_shared_library(self) -> None:
+        """60/90 必须只 source 共享库，不得保留本地副本。"""
+        self.assertTrue(HELM_LIB.is_file(), 'lib/helm.sh is missing')
+        self.assertFalse(HELM_LIB.is_symlink())
+        self.assertEqual(HELM_LIB.stat().st_mode & 0o022, 0)
+
+        shared = HELM_LIB.read_text(encoding='utf-8')
+        for declaration in self.DECLARATIONS:
+            self.assertEqual(shared.count(declaration + ' '), 1, declaration)
+        # 临时目录变量也必须只有一份，两边各留一份会让 trap 清理各自为政。
+        self.assertEqual(
+            shared.splitlines().count('helm_kubeconfig_dir='), 1
+        )
+        self.assertIn('/exec-safety.sh"', shared)
+        self.assertIn('/kubectl.sh"', shared)
+
+        source_line = 'source "${script_dir}/lib/helm.sh"'
+        for stage in self.STAGES:
+            with self.subTest(stage=stage.name):
+                body = stage.read_text(encoding='utf-8')
+                self.assertIn(source_line, body)
+                for declaration in self.DECLARATIONS:
+                    self.assertNotIn(declaration + ' {', body, declaration)
+                    self.assertNotIn(declaration + ' (', body, declaration)
+                self.assertNotIn('\nhelm_kubeconfig_dir=\n', body)
+
+    def test_archive_predicate_requires_an_explicit_argument(self) -> None:
+        """helm_archive_is_safe 必须显式传参：60 有 staged 与 apply 两个来源，
+        默认参数会让调用点看不出用的是哪一个。"""
+        shared = HELM_LIB.read_text(encoding='utf-8')
+        self.assertIn('  local archive=$1\n', shared)
+        self.assertNotIn('${1:-$helm_archive_input}', shared)
+        for stage in self.STAGES:
+            with self.subTest(stage=stage.name):
+                for line in stage.read_text(encoding='utf-8').splitlines():
+                    if 'helm_archive_is_safe' in line:
+                        self.assertRegex(line, r'helm_archive_is_safe "\$')
 
 
 class CidrCheckTest(BootstrapTestCase):

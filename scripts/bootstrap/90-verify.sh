@@ -49,6 +49,8 @@ source "${script_dir}/lib/admin-conf.sh"
 # shellcheck disable=SC1091
 source "${script_dir}/lib/kubectl.sh"
 # shellcheck disable=SC1091
+source "${script_dir}/lib/helm.sh"
+# shellcheck disable=SC1091
 source "${script_dir}/lib/common.sh"
 # shellcheck disable=SC1091
 source "${script_dir}/lib/path-facts.sh"
@@ -208,69 +210,13 @@ cni_payload_is_exact() {
   done < <(cni_manifest)
 }
 
-helm_run() {
-  PYTHONDONTWRITEBYTECODE=1 KUBECACHEDIR=/dev/null "$helm_binary" "$@"
-}
-
-# 当前 helm kubeconfig 临时目录；EXIT trap 据此清理，成功 rmdir 后清空。
-helm_kubeconfig_dir=
-
 # 与 Stage 60 相同：helm 无法从管道读取 kubeconfig，改用 /root 下私有临时文件。
-helm_cluster_run() {
-  local exit_code=0 parent kubeconfig_dir kubeconfig
-  admin_conf_is_safe || return 1
-  parent=$(host_path /root)
-  safe_directory "$parent" 700 || return 1
-  kubeconfig_dir=$(mktemp -d "${parent}/.helm-kubeconfig.XXXXXX") || return 1
-  helm_kubeconfig_dir=$kubeconfig_dir
-  # 命令替换子 shell 会把 EXIT trap 重置为继承值，主 shell 的 trap 看不到子 shell
-  # 里的目录名；只在子 shell 内补装。
-  (( BASH_SUBSHELL == 0 )) || trap 'cleanup_helm_kubeconfig || :' EXIT
-  kubeconfig="${kubeconfig_dir}/config"
-  if ! safe_directory "$kubeconfig_dir" 700 ||
-     ! printf '%s' "$ADMIN_CONF_CONTENT" >"$kubeconfig" ||
-     ! safe_file "$kubeconfig" 600 ||
-     ! cmp -s "$kubeconfig" <(printf '%s' "$ADMIN_CONF_CONTENT"); then
-    rm -f -- "$kubeconfig"
-    if rmdir -- "$kubeconfig_dir" 2>/dev/null; then
-      helm_kubeconfig_dir=
-    fi
-    return 1
-  fi
-  PYTHONDONTWRITEBYTECODE=1 KUBECACHEDIR=/dev/null "$helm_binary" \
-    --kubeconfig "$kubeconfig" "$@" || exit_code=$?
-  rm -f -- "$kubeconfig" || return 1
-  rmdir -- "$kubeconfig_dir" || return 1
-  helm_kubeconfig_dir=
-  admin_conf_is_safe || return 1
-  return "$exit_code"
-}
 
 # trap 间接调用；只删除 /root 下本进程建立的 .helm-kubeconfig.* 目录。
 # 静态检查 0.9 报 SC2317（不可达）、0.11 报 SC2329（未调用），均为 trap 间接调用的误报。
 # shellcheck disable=SC2317,SC2329
-cleanup_helm_kubeconfig() {
-  local parent
-  [[ -n "$helm_kubeconfig_dir" ]] || return 0
-  parent=$(host_path /root)
-  [[ "${helm_kubeconfig_dir%/*}" == "$parent" &&
-      "${helm_kubeconfig_dir##*/}" == .helm-kubeconfig.* ]] || return 1
-  [[ -d "$helm_kubeconfig_dir" && ! -L "$helm_kubeconfig_dir" ]] || return 1
-  rm -f -- "${helm_kubeconfig_dir}/config" || return 1
-  rmdir -- "$helm_kubeconfig_dir" || return 1
-  helm_kubeconfig_dir=
-}
 
 # 子 shell 隔离 shopt；只检测残留，绝不自动删除（留给运维检查后手工清理）。
-helm_kubeconfig_residue_exists() (
-  local entry
-  shopt -s nullglob dotglob
-  for entry in "$(host_path /root)"/.helm-kubeconfig.*; do
-    : "$entry"
-    exit 0
-  done
-  exit 1
-)
 
 staged_inputs_are_exact() {
   local digest
@@ -285,37 +231,10 @@ staged_inputs_are_exact() {
   [[ "$digest" == "$GATEWAY_MANIFEST_SHA256" ]]
 }
 
-helm_archive_is_safe() {
-  python_isolated - "$helm_archive" "$HELM_MEMBER" <<'PY' >/dev/null 2>&1
-import pathlib
-import sys
-import tarfile
-
-archive_path, expected_member = sys.argv[1:]
-try:
-    with tarfile.open(archive_path, mode="r:gz") as archive:
-        matches = []
-        for member in archive.getmembers():
-            path = pathlib.PurePosixPath(member.name)
-            if path.is_absolute() or ".." in path.parts or not member.name:
-                raise SystemExit(1)
-            if not (member.isfile() or member.isdir()):
-                raise SystemExit(1)
-            if member.name == expected_member:
-                matches.append(member)
-        if len(matches) != 1 or not matches[0].isfile():
-            raise SystemExit(1)
-        if matches[0].mode & 0o111 == 0:
-            raise SystemExit(1)
-except (OSError, tarfile.TarError):
-    raise SystemExit(1)
-PY
-}
-
 helm_binary_is_exact() {
   local shadow
   staged_inputs_are_exact || return 1
-  helm_archive_is_safe || return 1
+  helm_archive_is_safe "$helm_archive" || return 1
   safe_directory "$(host_path /usr)" 755 || return 1
   safe_directory "$(host_path /usr/local)" 755 || return 1
   safe_directory "$(host_path /usr/local/bin)" 755 || return 1
@@ -395,71 +314,6 @@ kube_proxy_is_absent() {
   kubectl_query_is_empty --namespace kube-system get daemonset kube-proxy --ignore-not-found --output=name || return 1
   kubectl_query_is_empty --namespace kube-system get pods --selector k8s-app=kube-proxy --output=name || return 1
   kubectl_query_is_empty --namespace kube-system get configmap kube-proxy --ignore-not-found --output=name
-}
-
-helm_values_json_is_exact() {
-  python_isolated -c '
-import json
-import sys
-
-expected = {
-    "kubeProxyReplacement": True,
-    "k8sServiceHost": sys.argv[1],
-    "k8sServicePort": 6443,
-    "cgroup": {
-        "autoMount": {"enabled": False},
-        "hostRoot": "/sys/fs/cgroup",
-    },
-    "gatewayAPI": {"enabled": True},
-    "hubble": {"enabled": False},
-    "image": {
-        "digest": "sha256:383968cd5e8873f7976fa76aa6196045643558f4cc9518a207b9335cb24a0e93",
-        "useDigest": True,
-    },
-    "ipam": {"mode": "kubernetes"},
-    "operator": {
-        "image": {
-            "genericDigest": "sha256:80744a8cc7c91c2f9e6347629406844eb35d79b30a732c6d41c15b17232a74f3",
-            "useDigest": True,
-        },
-        "replicas": 1,
-    },
-}
-
-def unique_object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate key")
-        result[key] = value
-    return result
-
-def reject_constant(_value):
-    raise ValueError("non-finite number")
-
-def exactly_equal(actual, wanted):
-    if type(actual) is not type(wanted):
-        return False
-    if isinstance(wanted, dict):
-        return set(actual) == set(wanted) and all(
-            exactly_equal(actual[key], wanted[key]) for key in wanted
-        )
-    if isinstance(wanted, list):
-        return len(actual) == len(wanted) and all(
-            exactly_equal(left, right) for left, right in zip(actual, wanted)
-        )
-    return actual == wanted
-
-try:
-    actual = json.load(
-        sys.stdin,
-        object_pairs_hook=unique_object,
-        parse_constant=reject_constant,
-    )
-except (TypeError, ValueError):
-    raise SystemExit(1)
-raise SystemExit(0 if exactly_equal(actual, expected) else 1)
-' "$HOST_NODE_IP" >/dev/null 2>&1
 }
 
 helm_release_is_exact() {

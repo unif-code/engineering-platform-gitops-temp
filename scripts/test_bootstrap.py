@@ -5544,7 +5544,7 @@ esac
             '''
             #!/bin/sh
             printf 'mv %s\n' "$*" >>"$FAKE_COMMAND_LOG"
-            eval "last=\${${#}}"
+            eval "last=\\${${#}}"
             if [ -n "${FAKE_MV_RACE_TARGET:-}" ]; then
               if [ "$last" = "$FAKE_MV_RACE_TARGET" ]; then
                 printf 'concurrent\n' >"$last"
@@ -6873,7 +6873,7 @@ class KubernetesInstallTest(BootstrapTestCase):
                   fi
                   if [ -n "${FAKE_INDEX_DUPLICATE:-}" ]; then
                     printf '\n' >>"$lists/kubernetes_Packages"
-                    sed -n "/^Package: ${FAKE_INDEX_DUPLICATE}\$/,/^\$/p" \
+                    sed -n "/^Package: ${FAKE_INDEX_DUPLICATE}\\$/,/^\\$/p" \
                       "$FAKE_PACKAGES_INDEX" >>"$lists/kubernetes_Packages"
                   fi
                 fi

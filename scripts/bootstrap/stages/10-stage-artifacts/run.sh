@@ -12,6 +12,8 @@ repo_root=$(cd "${bootstrap_dir}/../.." && pwd -P)
 source "${bootstrap_dir}/lib/common.sh"
 # shellcheck disable=SC1091
 source "${bootstrap_dir}/lib/archive.sh"
+# shellcheck disable=SC1091
+source "${script_dir}/gates.sh"
 
 readonly ARTIFACT_SET=pcs-2026-08-10.1
 readonly MINIMUM_AVAILABLE_KIB=1048576
@@ -19,53 +21,6 @@ readonly APPROVED_RECORD_COUNT=6
 # PHASE 由公共 evidence helper 间接读取。
 # shellcheck disable=SC2034
 readonly PHASE=stage-artifacts
-
-is_official_url() {
-  local url=$1
-  local host
-
-  if [[ ! "$url" =~ ^https://([^/:?#]+)(/[^?#]*)?$ ]]; then
-    return 1
-  fi
-  host=${BASH_REMATCH[1]}
-  case "$host" in
-    github.com|get.helm.sh|helm.cilium.io)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-artifact_basename() {
-  local url=$1
-  local path=${url#https://*/}
-  local base=${path##*/}
-  [[ -n "$base" && "$base" != . && "$base" != .. && "$base" != *$'\n'* ]] || return 1
-  printf '%s\n' "$base"
-}
-
-artifact_state() {
-  local target=$1
-  local expected_digest=$2
-  local actual_digest
-
-  if [[ ! -e "$target" && ! -L "$target" ]]; then
-    printf 'MISSING\n'
-    return 0
-  fi
-  if [[ -L "$target" || ! -f "$target" ]]; then
-    printf 'DRIFT\n'
-    return 0
-  fi
-  actual_digest=$(sha256_file "$target") || return "$?"
-  if [[ "$actual_digest" == "$expected_digest" ]]; then
-    printf 'COMPLIANT\n'
-  else
-    printf 'DRIFT\n'
-  fi
-}
 
 private_directory() {
   local directory=$1

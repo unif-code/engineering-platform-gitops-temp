@@ -29,73 +29,14 @@ bootstrap_dir=$(cd "${script_dir}/../.." && pwd -P)
 source "${bootstrap_dir}/lib/common.sh"
 # shellcheck disable=SC1091
 source "${bootstrap_dir}/lib/path-facts.sh"
+# shellcheck disable=SC1091
+source "${script_dir}/gates.sh"
 
 # PHASE 由公共 evidence helper 间接读取。
 # shellcheck disable=SC2034
 readonly PHASE=prepare-kernel
 readonly MODULES_CONTENT=$'overlay\nbr_netfilter\n'
 readonly SYSCTL_CONTENT=$'net.bridge.bridge-nf-call-iptables = 1\nnet.bridge.bridge-nf-call-ip6tables = 1\nnet.ipv4.ip_forward = 1\n'
-
-require_managed_parent() {
-  local parent=$1
-  local mode
-
-  [[ -d "$parent" && ! -L "$parent" ]] || return 1
-  mode=$(path_mode "$parent") || return 1
-  [[ "$mode" == 755 ]] && owned_by_expected "$parent"
-}
-
-content_file_state() {
-  local target=$1
-  local expected=$2
-  local mode
-
-  if [[ ! -e "$target" && ! -L "$target" ]]; then
-    printf 'MISSING\n'
-    return 0
-  fi
-  if [[ -L "$target" || ! -f "$target" ]]; then
-    printf 'UNKNOWN\n'
-    return 0
-  fi
-  mode=$(path_mode "$target") || {
-    printf 'UNKNOWN\n'
-    return 0
-  }
-  if [[ "$mode" == 644 ]] && owned_by_expected "$target" && cmp -s <(printf '%s' "$expected") "$target"; then
-    printf 'COMPLIANT\n'
-  else
-    printf 'UNKNOWN\n'
-  fi
-}
-
-runtime_state() {
-  local overlay_path=$1
-  local br_netfilter_path=$2
-  local bridge_ipv4_path=$3
-  local bridge_ipv6_path=$4
-  local ip_forward_path=$5
-  local path
-  local value
-
-  for path in "$overlay_path" "$br_netfilter_path"; do
-    if [[ -e "$path" || -L "$path" ]]; then
-      [[ -d "$path" && ! -L "$path" ]] || return 2
-    else
-      return 1
-    fi
-  done
-  for path in "$bridge_ipv4_path" "$bridge_ipv6_path" "$ip_forward_path"; do
-    if [[ -e "$path" || -L "$path" ]]; then
-      [[ -f "$path" && ! -L "$path" ]] || return 2
-    else
-      return 1
-    fi
-    IFS= read -r value <"$path" || return 2
-    [[ "$value" == 1 ]] || return 1
-  done
-  return 0
-}
 
 atomic_publish_content() {
   local target=$1

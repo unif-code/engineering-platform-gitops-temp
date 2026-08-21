@@ -146,6 +146,20 @@ class BootstrapTestCase(unittest.TestCase):
         for number, path in STAGE_SCRIPTS.items()
     }
 
+    @classmethod
+    def stage_text(cls, stage: str) -> str:
+        """一个 stage 的全部源码：run.sh 与（若有）gates.sh。
+
+        判定族拆进 gates.sh 后，「stage 是否调用了某个共享判定」这类断言必须看
+        整个 stage，只看 run.sh 会把拆分本身误判成"不再使用"。
+        """
+        run = ROOT / STAGE_SCRIPTS[stage]
+        text = run.read_text(encoding='utf-8')
+        gates = run.parent / 'gates.sh'
+        if gates.is_file():
+            text += gates.read_text(encoding='utf-8')
+        return text
+
     @staticmethod
     def library_source_pattern(library: str) -> str:
         """匹配「source 了某个共享库」，不钉锚点变量名。
@@ -659,8 +673,8 @@ class CommonLibraryTest(BootstrapTestCase):
         self.assertTrue(shared.is_file(), 'shared kubelet validator is missing')
 
         shared_source = shared.read_text(encoding='utf-8')
-        stage40 = INSTALL_KUBERNETES.read_text(encoding='utf-8')
-        stage50 = KUBEADM_INIT.read_text(encoding='utf-8')
+        stage40 = self.stage_text('40')
+        stage50 = self.stage_text('50')
         static = (ROOT / 'scripts/validate-static.sh').read_text(
             encoding='utf-8'
         )
@@ -1745,6 +1759,67 @@ class HelmLibraryTest(BootstrapTestCase):
                 for line in stage.read_text(encoding='utf-8').splitlines():
                     if 'helm_archive_is_safe' in line:
                         self.assertRegex(line, r'helm_archive_is_safe "\$')
+
+
+class StageReadmeTest(BootstrapTestCase):
+    """每个 stage 目录的 README 与 run.sh 的实际 REASON 集合必须一致。
+
+    per-stage README 最大的问题是漂移：写的时候对，改了代码就悄悄不对了，而错误的
+    运维文档比没有文档更危险。这里把它变成可判红的契约。
+    """
+
+    REASON = re.compile(r'complete\s+STOP_[A-Z_]+\s+([a-z0-9-]+)')
+
+    def stage_dirs(self) -> list[Path]:
+        return sorted(
+            (ROOT / path).parent for path in STAGE_SCRIPTS.values()
+        )
+
+    def test_every_stage_has_a_readme(self) -> None:
+        directories = self.stage_dirs()
+        self.assertEqual(len(directories), 8, [str(d) for d in directories])
+        for directory in directories:
+            with self.subTest(stage=directory.name):
+                readme = directory / 'README.md'
+                self.assertTrue(readme.is_file(), readme)
+                body = readme.read_text(encoding='utf-8')
+                self.assertTrue(body.startswith(f'# {directory.name}\n'), body[:60])
+                self.assertIn('## 停止原因', body)
+
+    def test_readme_stop_reasons_match_the_stage(self) -> None:
+        """列出的 REASON 必须与 run.sh 能发出的字面量集合完全一致，多一个少一个都红。"""
+        for directory in self.stage_dirs():
+            with self.subTest(stage=directory.name):
+                run = directory / 'run.sh'
+                actual = sorted(set(self.REASON.findall(
+                    run.read_text(encoding='utf-8')
+                )))
+                listed = sorted(re.findall(
+                    r'^- `([a-z0-9-]+)`$',
+                    (directory / 'README.md').read_text(encoding='utf-8'),
+                    re.M,
+                ))
+                self.assertTrue(actual, f'{directory.name} 未解析到任何 REASON')
+                self.assertEqual(listed, actual)
+
+    def test_gates_file_presence_matches_the_stage_shape(self) -> None:
+        """有纯判定函数的 stage 必须有 gates.sh 且被 run.sh 引入；没有的不许凭空造。"""
+        for directory in self.stage_dirs():
+            with self.subTest(stage=directory.name):
+                body = (directory / 'run.sh').read_text(encoding='utf-8')
+                gates = directory / 'gates.sh'
+                sources_gates = 'source "${script_dir}/gates.sh"' in body
+                self.assertEqual(
+                    gates.is_file(),
+                    sources_gates,
+                    f'{directory.name}: gates.sh 存在性与 run.sh 的 source 不一致',
+                )
+                if gates.is_file():
+                    self.assertEqual(gates.stat().st_mode & 0o022, 0)
+                    text = gates.read_text(encoding='utf-8')
+                    # 判定族不得终止流程或打印证据——那是 run.sh 的职责。
+                    for forbidden in ('complete ', 'log_evidence', '\nexit '):
+                        self.assertNotIn(forbidden, text, forbidden)
 
 
 class CidrCheckTest(BootstrapTestCase):
@@ -4206,21 +4281,33 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
             )
             for line in shell_directory_assignments(body)
         ]
+        # 允许两类目标：被门禁覆盖的 lib 目录，以及 stage 自己目录下的 gates.sh。
+        # 后者由 bootstrap-all.sh 的 stage 目录**逐条目**门禁覆盖（属主、权限、
+        # 非符号链接），与 lib 同级保护；判定族拆出去是为了让"事实是什么"能被单独
+        # 阅读，而不是为了绕开门禁。除这两处之外一律判死。
+        allowed = {gated_dir, str(script.parent)}
         names: list[str] = []
         for word in shell_source_words(body):
             target = Path(
                 self.expand_shell_word(assignments, word, str(script))
             )
-            self.assertEqual(
+            self.assertIn(
                 str(target.parent),
-                gated_dir,
-                f'{script.name} source 了门禁目录之外的 {target}',
+                allowed,
+                f'{script.name} source 了门禁覆盖之外的 {target}',
             )
+            if str(target.parent) != gated_dir:
+                self.assertEqual(
+                    target.name,
+                    'gates.sh',
+                    f'{script.name} 只能额外 source 同目录的 gates.sh，不是 {target}',
+                )
             self.assertTrue(
                 target.is_file() and not target.is_symlink(),
                 f'{script.name} source 的 {target} 不是普通文件',
             )
-            names.append(target.name)
+            if str(target.parent) == gated_dir:
+                names.append(target.name)
         return names
 
     def test_real_stages_source_only_files_under_the_gated_library_dir(

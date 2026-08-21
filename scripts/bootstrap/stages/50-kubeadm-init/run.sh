@@ -564,7 +564,7 @@ case "$state" in
   CANDIDATE)
     initialized_control_plane_gate STOP_UNKNOWN_STATE "$EXIT_UNKNOWN_STATE" initialized
     complete ALREADY_COMPLIANT control-plane-initialized 0 \
-      '60-install-cilium.sh --check'
+      'stages/60-install-cilium/run.sh --check'
     ;;
   UNKNOWN)
     complete STOP_ALREADY_INITIALIZED initialized-or-partial-state-present \
@@ -623,4 +623,4 @@ log_evidence KUBELET_ACTIVE=active
 log_evidence "CERTIFICATE_SUBJECT=${certificate_subject}"
 log_evidence CERTIFICATE_SAN_IP="$HOST_NODE_IP"
 log_evidence "CERTIFICATE_EXPIRY=${certificate_expiry}"
-complete PASS_KUBEADM_INITIALIZED control-plane-initialized 0 '60-install-cilium.sh --check'
+complete PASS_KUBEADM_INITIALIZED control-plane-initialized 0 'stages/60-install-cilium/run.sh --check'

@@ -34,8 +34,8 @@ STAGE_SCRIPTS = {
     '30': 'scripts/bootstrap/stages/30-install-containerd/run.sh',
     '40': 'scripts/bootstrap/stages/40-install-kubernetes/run.sh',
     '50': 'scripts/bootstrap/stages/50-kubeadm-init/run.sh',
-    '60': 'scripts/bootstrap/60-install-cilium.sh',
-    '90': 'scripts/bootstrap/90-verify.sh',
+    '60': 'scripts/bootstrap/stages/60-install-cilium/run.sh',
+    '90': 'scripts/bootstrap/stages/90-verify/run.sh',
 }
 PREFLIGHT = ROOT / STAGE_SCRIPTS['00']
 STAGE_ARTIFACTS = ROOT / STAGE_SCRIPTS['10']
@@ -4502,7 +4502,7 @@ class ArtifactStageTest(BootstrapTestCase):
             mode='CHECK',
             result='ALREADY_COMPLIANT',
             reason='artifacts-ready',
-            next_step='20-prepare-kernel.sh --check',
+            next_step='stages/20-prepare-kernel/run.sh --check',
         )
 
     def test_apply_required_check_has_one_structured_terminal_result(self) -> None:
@@ -4516,7 +4516,7 @@ class ArtifactStageTest(BootstrapTestCase):
             mode='CHECK',
             result='PASS_ARTIFACTS_CHECK',
             reason='apply-required',
-            next_step='10-stage-artifacts.sh --apply',
+            next_step='stages/10-stage-artifacts/run.sh --apply',
         )
 
     def test_successful_apply_separates_artifact_and_terminal_digests(self) -> None:
@@ -4530,7 +4530,7 @@ class ArtifactStageTest(BootstrapTestCase):
             mode='APPLY',
             result='PASS_ARTIFACTS_STAGED',
             reason='artifacts-staged',
-            next_step='20-prepare-kernel.sh --check',
+            next_step='stages/20-prepare-kernel/run.sh --check',
         )
         lines = result.stdout.splitlines()
         self.assertEqual(
@@ -10707,7 +10707,7 @@ class KubeadmInitTest(BootstrapTestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('RESULT=PASS_KUBEADM_INITIALIZED', result.stdout)
-        self.assertIn('NEXT=60-install-cilium.sh --check', result.stdout)
+        self.assertIn('NEXT=stages/60-install-cilium/run.sh --check', result.stdout)
         commands = [
             line for line in command_log.read_text(encoding='utf-8').splitlines()
             if line.startswith('kubeadm ')
@@ -12003,7 +12003,7 @@ operator:
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('RESULT=PASS_CILIUM_CHECK', result.stdout)
-        self.assertIn('NEXT=60-install-cilium.sh --apply', result.stdout)
+        self.assertIn('NEXT=stages/60-install-cilium/run.sh --apply', result.stdout)
         self.assertFalse((host / 'usr/local/bin/helm').exists())
         self.assertEqual(
             list((host / 'root/dev-infra-evidence').glob('13-cilium-*.txt')),
@@ -12230,7 +12230,7 @@ operator:
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('RESULT=PASS_CILIUM_INSTALLED', result.stdout)
-        self.assertIn('NEXT=90-verify.sh --check', result.stdout)
+        self.assertIn('NEXT=stages/90-verify/run.sh --check', result.stdout)
         commands = command_log.read_text(encoding='utf-8').splitlines()
         staging = host / 'root/dev-infra-artifacts/pcs-2026-08-10.1'
         gateway_apply = next(line for line in commands if ' apply ' in line)
@@ -14694,12 +14694,14 @@ class FinalVerifyTest(BootstrapTestCase):
         # 路径由 STAGE_SCRIPTS 派生：stage 迁进 stages/<NN-name>/run.sh 后，写死的
         # 平铺路径会让这条断言在迁移当次判红，而它要钉的其实是「以特权子 bash、
         # 清空 BASH_ENV/ENV 的方式调用 containerd stage」这三件事，与布局无关。
-        containerd = self.stage_paths['30']
-        self.assertIn(
-            "BASH_ENV='' ENV='' PYTHONDONTWRITEBYTECODE=1 "
-            "\\\n      /bin/bash -p "
-            f'"${{script_dir}}/{containerd}"',
+        # 锚点变量随布局变化（平铺用 script_dir，迁移后用 bootstrap_dir），这里只钉
+        # 「以特权子 bash、清空 BASH_ENV/ENV、指向 containerd stage」这三件事。
+        containerd = re.escape(self.stage_paths['30'])
+        self.assertRegex(
             script,
+            r"BASH_ENV='' ENV='' PYTHONDONTWRITEBYTECODE=1 \\\n"
+            r'      /bin/bash -p "\$\{(?:script_dir|bootstrap_dir)\}/'
+            + containerd + '"',
         )
 
     def test_verify_stops_on_unregistered_host(self) -> None:
@@ -15245,7 +15247,7 @@ class FinalVerifyTest(BootstrapTestCase):
         self.assertIn('CSR_COUNT=0', result.stdout)
 
     def test_script_has_no_mutation_or_prior_package_stage_escape_hatches(self) -> None:
-        self.assertTrue(FINAL_VERIFY.exists(), '90-verify.sh entry is missing')
+        self.assertTrue(FINAL_VERIFY.exists(), '90-verify run.sh entry is missing')
         script = FINAL_VERIFY.read_text(encoding='utf-8')
         for forbidden in (
             self.stage_paths['40'], 'kubectl apply', 'kubectl patch',

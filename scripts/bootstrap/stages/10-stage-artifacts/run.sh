@@ -163,14 +163,14 @@ fi
 
 if [[ "$all_compliant" == true ]]; then
   complete ALREADY_COMPLIANT artifacts-ready 0 \
-    '20-prepare-kernel.sh --check'
+    'stages/20-prepare-kernel/run.sh --check'
 fi
 
 # parse_mode 在公共库中赋值。
 # shellcheck disable=SC2153
 if [[ "$MODE" == CHECK ]]; then
   complete PASS_ARTIFACTS_CHECK apply-required 0 \
-    '10-stage-artifacts.sh --apply'
+    'stages/10-stage-artifacts/run.sh --apply'
 fi
 
 if [[ -e "$artifact_root" || -L "$artifact_root" ]]; then
@@ -223,4 +223,4 @@ for index in "${!names[@]}"; do
 done
 
 complete PASS_ARTIFACTS_STAGED artifacts-staged 0 \
-  '20-prepare-kernel.sh --check'
+  'stages/20-prepare-kernel/run.sh --check'

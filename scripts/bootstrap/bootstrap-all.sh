@@ -261,8 +261,8 @@ stage_path() {
     30) printf '%s/stages/30-install-containerd/run.sh\n' "$stage_dir" ;;
     40) printf '%s/stages/40-install-kubernetes/run.sh\n' "$stage_dir" ;;
     50) printf '%s/stages/50-kubeadm-init/run.sh\n' "$stage_dir" ;;
-    60) printf '%s/60-install-cilium.sh\n' "$stage_dir" ;;
-    90) printf '%s/90-verify.sh\n' "$stage_dir" ;;
+    60) printf '%s/stages/60-install-cilium/run.sh\n' "$stage_dir" ;;
+    90) printf '%s/stages/90-verify/run.sh\n' "$stage_dir" ;;
     *) return 30 ;;
   esac
 }

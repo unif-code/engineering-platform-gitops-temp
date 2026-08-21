@@ -43,22 +43,24 @@ else
 fi
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# run.sh 比原来的平铺位置深两层；lib/ 与其它 stage 都以 bootstrap_dir 为锚点。
+bootstrap_dir=$(cd "${script_dir}/../.." && pwd -P)
 # shellcheck disable=SC1091
-source "${script_dir}/lib/common.sh"
+source "${bootstrap_dir}/lib/common.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/path-facts.sh"
+source "${bootstrap_dir}/lib/path-facts.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/exec-safety.sh"
+source "${bootstrap_dir}/lib/exec-safety.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/host-config.sh"
+source "${bootstrap_dir}/lib/host-config.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/admin-conf.sh"
+source "${bootstrap_dir}/lib/admin-conf.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/kubectl.sh"
+source "${bootstrap_dir}/lib/kubectl.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/helm.sh"
+source "${bootstrap_dir}/lib/helm.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/dpkg-package-verification.sh"
+source "${bootstrap_dir}/lib/dpkg-package-verification.sh"
 
 # PHASE 由公共 evidence helper 间接读取。
 # shellcheck disable=SC2034
@@ -968,13 +970,13 @@ load_cluster_state "$helm_state"
 [[ "$CLUSTER_STATE" != UNKNOWN ]] || complete STOP_UNKNOWN_STATE gateway-cilium-cluster-state-unknown "$EXIT_UNKNOWN_STATE" NONE
 
 if [[ "$CLUSTER_STATE" == COMPLIANT ]]; then
-  complete ALREADY_COMPLIANT cilium-ready 0 '90-verify.sh --check'
+  complete ALREADY_COMPLIANT cilium-ready 0 'stages/90-verify/run.sh --check'
 fi
 
 # MODE 由公共 parse_mode helper 赋值。
 # shellcheck disable=SC2153
 if [[ "$MODE" == CHECK ]]; then
-  complete PASS_CILIUM_CHECK apply-required 0 '60-install-cilium.sh --apply'
+  complete PASS_CILIUM_CHECK apply-required 0 'stages/60-install-cilium/run.sh --apply'
 fi
 
 trap 'cleanup_apply_state || :' EXIT
@@ -1083,4 +1085,4 @@ log_evidence CILIUM_VERSION=1.20.0
 log_evidence KUBE_PROXY_OBJECTS=absent
 log_evidence CILIUM_DAEMONSET_READY=true
 log_evidence CILIUM_OPERATOR_READY=true
-complete PASS_CILIUM_INSTALLED cilium-ready 0 '90-verify.sh --check'
+complete PASS_CILIUM_INSTALLED cilium-ready 0 'stages/90-verify/run.sh --check'

@@ -295,7 +295,7 @@ SWAP_FILE_RE = re.compile(r'^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$')
 PIN_LINE_RE = re.compile(r'^([0-9a-f]{64})  (kubeadm-init\.yaml|cilium-values\.yaml)$')
 
 # cilium-values.yaml 的锁死骨架：唯一可变的是 {node_ip}（取 host.env 的 HOST_NODE_IP）。
-# 运行期孪生在 scripts/bootstrap/60-install-cilium.sh 的 values_semantics_are_exact，
+# 运行期孪生在 scripts/bootstrap/stages/60-install-cilium/run.sh 的 values_semantics_are_exact，
 # 改这里必须同步改那里。
 CILIUM_VALUES_SKELETON = '''kubeProxyReplacement: true
 k8sServiceHost: {node_ip}

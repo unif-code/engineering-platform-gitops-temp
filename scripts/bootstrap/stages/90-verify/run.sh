@@ -44,24 +44,26 @@ else
 fi
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# run.sh 比原来的平铺位置深两层；lib/ 与其它 stage 都以 bootstrap_dir 为锚点。
+bootstrap_dir=$(cd "${script_dir}/../.." && pwd -P)
 # shellcheck disable=SC1091
-source "${script_dir}/lib/admin-conf.sh"
+source "${bootstrap_dir}/lib/admin-conf.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/kubectl.sh"
+source "${bootstrap_dir}/lib/kubectl.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/helm.sh"
+source "${bootstrap_dir}/lib/helm.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/common.sh"
+source "${bootstrap_dir}/lib/common.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/path-facts.sh"
+source "${bootstrap_dir}/lib/path-facts.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/exec-safety.sh"
+source "${bootstrap_dir}/lib/exec-safety.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/cni-manifest.sh"
+source "${bootstrap_dir}/lib/cni-manifest.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/dpkg-package-verification.sh"
+source "${bootstrap_dir}/lib/dpkg-package-verification.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/host-config.sh"
+source "${bootstrap_dir}/lib/host-config.sh"
 
 # PHASE 由公共 evidence helper 间接读取。
 # shellcheck disable=SC2034
@@ -102,9 +104,9 @@ containerd_gate_is_exact() {
   local captured
   captured=$(
     set +e
-    cd "$script_dir" || exit 30
+    cd "$bootstrap_dir" || exit 30
     BASH_ENV='' ENV='' PYTHONDONTWRITEBYTECODE=1 \
-      /bin/bash -p "${script_dir}/stages/30-install-containerd/run.sh" --check 2>&1
+      /bin/bash -p "${bootstrap_dir}/stages/30-install-containerd/run.sh" --check 2>&1
     printf '__EXIT_CODE__=%s\n' "$?"
   )
   [[ "$captured" == "${CONTAINERD_TRANSCRIPT}"$'\n__EXIT_CODE__=0' ]]

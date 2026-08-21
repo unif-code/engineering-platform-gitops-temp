@@ -18,6 +18,7 @@ stage_index=0
 stage_started=0
 progress_heartbeat_pid=
 readonly PROGRESS_HEARTBEAT_DEFAULT=15
+readonly PROGRESS_HEARTBEAT_FIRST=5
 heartbeat_seconds=$PROGRESS_HEARTBEAT_DEFAULT
 
 case "$#:${1:-}" in
@@ -339,13 +340,17 @@ report_progress() {
 # 每次一整行而不是原地刷新：日志要能 grep，进度条会毁掉这一点。
 start_progress_heartbeat() {
   local stage=$1 operation=$2
+  # 先快后稳：第一次很快报活，确认「在跑不是卡死」；之后拉长，避免长 stage 刷屏。
+  local interval=$PROGRESS_HEARTBEAT_FIRST
+  (( interval < heartbeat_seconds )) || interval=$heartbeat_seconds
   (
     elapsed=0
     while :; do
-      /bin/sleep "$heartbeat_seconds"
-      elapsed=$(( elapsed + heartbeat_seconds ))
+      /bin/sleep "$interval"
+      elapsed=$(( elapsed + interval ))
       printf '[%s/%s] stage %s %s ... %ss elapsed\n' \
         "$stage_index" "${#STAGES[@]}" "$stage" "$operation" "$elapsed" >&2
+      interval=$heartbeat_seconds
     done
   ) &
   progress_heartbeat_pid=$!

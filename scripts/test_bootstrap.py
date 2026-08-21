@@ -3874,6 +3874,25 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
         self.assertNotIn('elapsed', result.stdout)
         self.assertNotIn(self.canary, result.stdout + result.stderr)
 
+    def test_first_heartbeat_lands_early_then_settles(self) -> None:
+        """先快后稳：第一次很快报活，之后拉长。
+
+        稳态间隔要照顾几分钟量级的 --apply，不能太密；但运维最需要的是**开头那几秒**
+        确认「在跑不是卡死」。两个诉求冲突，用「首拍早、后续稳」解决。
+        间隔取 9 秒、stage 耗时 7 秒：首拍 5 秒必须出现，第二拍 5+9=14 秒必然超出
+        stage 时长——因此恰好只有一拍，且值为 5。若首拍没有提前，7 秒内一拍都不会有。
+        """
+        self.environment['BOOTSTRAP_ORCHESTRATOR_TEST_HEARTBEAT_SECONDS'] = '9'
+        self.environment['FAKE_STAGE_DELAY'] = '40:7'
+
+        result = self.run_orchestrator('--apply')
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        beats = re.findall(
+            r'\[5/8\] stage 40 check \.\.\. (\d+)s elapsed', result.stderr
+        )
+        self.assertEqual(beats, ['5'], result.stderr)
+
     def test_heartbeat_seam_is_shape_checked_and_production_only_rejects(
         self,
     ) -> None:

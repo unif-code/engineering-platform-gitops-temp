@@ -131,7 +131,6 @@ report_cluster_state() {
   log_evidence "KUBE_PROXY_STATE=${KUBE_PROXY_STATE}"
   log_evidence "HELM_BINARY_STATE=${1}"
   log_evidence "GATEWAY_STATE=${GATEWAY_STATE}"
-  log_evidence "HELM_SECRET_STATE=${HELM_SECRET_STATE}"
   log_evidence "CILIUM_WORKLOAD_STATE=${CILIUM_WORKLOAD_STATE}"
   log_evidence "ENVOY_DAEMONSET_STATE=${ENVOY_DAEMONSET_STATE}"
   log_evidence "ENVOY_PODS_STATE=${ENVOY_PODS_STATE}"

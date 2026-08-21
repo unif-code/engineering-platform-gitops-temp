@@ -28,10 +28,10 @@ CIDR_CHECK = ROOT / 'scripts/bootstrap/check_cidrs.py'
 # 下面的常量、stage_names 与 stage_script() 全部由它派生，散落的字面量由
 # test_stage_paths_come_from_one_table 挡住。
 STAGE_SCRIPTS = {
-    '00': 'scripts/bootstrap/00-preflight.sh',
-    '10': 'scripts/bootstrap/10-stage-artifacts.sh',
-    '20': 'scripts/bootstrap/20-prepare-kernel.sh',
-    '30': 'scripts/bootstrap/30-install-containerd.sh',
+    '00': 'scripts/bootstrap/stages/00-preflight/run.sh',
+    '10': 'scripts/bootstrap/stages/10-stage-artifacts/run.sh',
+    '20': 'scripts/bootstrap/stages/20-prepare-kernel/run.sh',
+    '30': 'scripts/bootstrap/stages/30-install-containerd/run.sh',
     '40': 'scripts/bootstrap/40-install-kubernetes.sh',
     '50': 'scripts/bootstrap/50-kubeadm-init.sh',
     '60': 'scripts/bootstrap/60-install-cilium.sh',
@@ -102,7 +102,7 @@ class BootstrapTestCase(unittest.TestCase):
         """
         names: set[str] = set()
         prefixes: set[str] = set()
-        for script in sorted(BOOTSTRAP_ALL.parent.glob('[0-9]*.sh')):
+        for script in sorted(ROOT / path for path in STAGE_SCRIPTS.values()):
             body = script.read_text(encoding='utf-8')
             for block in cls.UNTRUSTED_GUARD_BLOCK.findall(body):
                 names.update(
@@ -127,7 +127,7 @@ class BootstrapTestCase(unittest.TestCase):
         前缀通配按 `<前缀>PROBE` 造名（`${!PYTHON@}` -> PYTHONPROBE），落在通配范围内。
         """
         names: set[str] = set()
-        for script in sorted(BOOTSTRAP_ALL.parent.glob('[0-9]*.sh')):
+        for script in sorted(ROOT / path for path in STAGE_SCRIPTS.values()):
             body = script.read_text(encoding='utf-8')
             for block in cls.UNTRUSTED_GUARD_BLOCK.findall(body):
                 names.update(
@@ -138,6 +138,20 @@ class BootstrapTestCase(unittest.TestCase):
         return {
             name: f'/tmp/unapproved-{name.lower()}' for name in sorted(names)
         }
+
+    @staticmethod
+    def library_source_pattern(library: str) -> str:
+        """匹配「source 了某个共享库」，不钉锚点变量名。
+
+        平铺 stage 用 ${script_dir}/lib/…，迁移进 stages/<NN-name>/run.sh 后用
+        ${bootstrap_dir}/lib/…。锚点本身是否指向被门禁覆盖的那个目录，由
+        BootstrapOrchestratorTest 的门禁前提用例逐条展开校验；这里再钉一次变量名
+        只会让每次目录迁移都要重锚一批断言，却不增加任何捕获能力。
+        """
+        return (
+            r'source "\$\{(?:script_dir|bootstrap_dir)\}/lib/'
+            + re.escape(library) + '"'
+        )
 
     @staticmethod
     def stage_script(stage: str) -> Path:
@@ -572,6 +586,25 @@ class CommonLibraryTest(BootstrapTestCase):
                 self.assertFalse(path.is_symlink(), path)
                 self.assertTrue(os.access(path, os.X_OK), path)
 
+        # 交叉校验：表必须与编排器 stage_path() 的映射逐条一致。没有这一条，
+        # 「测试从表枚举、断言又拿表比」就退化成恒真——账本 R5 警告的正是这个。
+        orchestrator = BOOTSTRAP_ALL.read_text(encoding='utf-8')
+        mapping = dict(
+            re.findall(
+                r"^    ([0-9]{2})\) printf '%s/(\S+)\\n' \"\$stage_dir\" ;;$",
+                orchestrator,
+                re.M,
+            )
+        )
+        self.assertEqual(
+            mapping,
+            {
+                number: path.split('scripts/bootstrap/', 1)[1]
+                for number, path in STAGE_SCRIPTS.items()
+            },
+            '测试的 STAGE_SCRIPTS 与编排器 stage_path() 不一致',
+        )
+
         source = (ROOT / 'scripts/test_bootstrap.py').read_text(encoding='utf-8')
         lines = source.splitlines()
         start = lines.index('STAGE_SCRIPTS = {')
@@ -600,14 +633,17 @@ class CommonLibraryTest(BootstrapTestCase):
         self.assertIn('local result=$1 reason=$2 code=$3 next=${4:-NONE}', shared)
         self.assertIn('finish_phase "$result" "$reason" "$code" "$next"', shared)
 
-        stages = sorted(BOOTSTRAP_ALL.parent.glob('[0-9]*.sh'))
-        self.assertEqual(len(stages), 8, [s.name for s in stages])
+        # 走表而非通配：迁移后 `[0-9]*.sh` 只剩尚未迁移的那几个，枚举会静默变少。
+        stages = sorted(ROOT / path for path in STAGE_SCRIPTS.values())
+        self.assertEqual(len(stages), 8, [str(s) for s in stages])
         for stage in stages:
             with self.subTest(stage=stage.name):
                 body = stage.read_text(encoding='utf-8')
                 for declaration in ('host_path()', 'complete()'):
                     self.assertNotIn(declaration + ' {', body, declaration)
-                self.assertIn('source "${script_dir}/lib/common.sh"', body)
+                self.assertRegex(
+                    body, self.library_source_pattern('common.sh')
+                )
                 # 内联版本独有的硬编码字段不得残留在任何 stage 里。
                 self.assertNotIn("printf 'EVIDENCE=NONE\\n", body)
 
@@ -624,14 +660,14 @@ class CommonLibraryTest(BootstrapTestCase):
         # 硬编码 source 字面量之一（其余在本类的 facts_source_line、
         # PathFactsTest 与 ExecSafetyTest）：Task 10 迁移 stage 40/50 后
         # ${script_dir} 语义改变，所有这类字面量必须一起改。
-        source_line = 'source "${script_dir}/lib/kubelet-default.sh"'
+        source_line = self.library_source_pattern('kubelet-default.sh')
         call = (
             'kubelet_default_conffile_is_pristine '
             '"$(host_path /etc/default/kubelet)"'
         )
 
-        self.assertIn(source_line, stage40)
-        self.assertIn(source_line, stage50)
+        self.assertRegex(stage40, source_line)
+        self.assertRegex(stage50, source_line)
         self.assertIn(call, stage40)
         self.assertIn(call, stage50)
         combined = shared_source + stage40 + stage50
@@ -651,18 +687,29 @@ class CommonLibraryTest(BootstrapTestCase):
         # 硬编码 source 字面量之一：本行、上面 kubelet-default.sh 的那条、
         # PathFactsTest 里的同源行，以及 ExecSafetyTest 的两条。Task 10 把 stage
         # 挪进 stages/<NN-name>/run.sh 后 ${script_dir} 语义改变，全部要一起改。
-        facts_source_line = 'source "${script_dir}/lib/path-facts.sh"'
+        facts_source_line = self.library_source_pattern('path-facts.sh')
         facts_source = PATH_FACTS.read_text(encoding='utf-8')
-        self.assertIn(facts_source_line, stage40)
-        self.assertIn(facts_source_line, stage50)
+        self.assertRegex(stage40, facts_source_line)
+        self.assertRegex(stage50, facts_source_line)
         for predicate in ('path_mode', 'path_size', 'owned_by_expected'):
             self.assertIn(f'{predicate} ', shared_source, predicate)
             self.assertIn(f'{predicate}()', facts_source, predicate)
             self.assertNotIn(f'{predicate}()', stage40, predicate)
             self.assertNotIn(f'{predicate}()', stage50, predicate)
-        self.assertIn(
-            '"$repo_root"/scripts/bootstrap/lib/*.sh', static
+        # 重锚：由「断言那两行通配的字面量」改为断言**覆盖面**——静态门禁必须把
+        # 每一个已跟踪的 bootstrap shell 脚本都交给 shellcheck。写死通配在 stage
+        # 迁进子目录后会静默漏检，而漏检不会报错，只会安静地不再守。
+        self.assertIn("find \"$repo_root/scripts/bootstrap\"", static)
+        self.assertIn('xargs -0 shellcheck', static)
+        covered = sorted(
+            path.relative_to(ROOT)
+            for path in (ROOT / 'scripts/bootstrap').rglob('*.sh')
         )
+        expected = sorted(
+            Path(path) for path in STAGE_SCRIPTS.values()
+        )
+        for stage_path in expected:
+            self.assertIn(stage_path, covered, stage_path)
 
 
 class ShellSourceStatementTest(BootstrapTestCase):
@@ -893,7 +940,7 @@ class PathFactsTest(BootstrapTestCase):
         # 与 CommonLibraryTest 里的 facts_source_line 同源的硬编码字面量：
         # Task 10 把 stage 挪进目录后 ${script_dir} 语义改变，连同
         # kubelet-default.sh 那条与 ExecSafetyTest 的两条，必须一起改。
-        source_line = 'source "${script_dir}/lib/path-facts.sh"'
+        source_line = self.library_source_pattern('path-facts.sh')
         declarations = (
             'path_owner()',
             'path_mode()',
@@ -906,7 +953,7 @@ class PathFactsTest(BootstrapTestCase):
         for stage in self.STAGES:
             with self.subTest(stage=stage.name):
                 body = stage.read_text(encoding='utf-8')
-                self.assertIn(source_line, body)
+                self.assertRegex(body, source_line)
                 self.assertIn(
                     'for test_override in "${!BOOTSTRAP_TEST_@}"',
                     body,
@@ -1159,8 +1206,8 @@ class ExecSafetyTest(BootstrapTestCase):
         # 硬编码 source 字面量，与 CommonLibraryTest/PathFactsTest 的几处同源：
         # Task 10 把 stage 挪进 stages/<NN-name>/run.sh 后 ${script_dir} 语义
         # 改变，所有这类字面量必须一起改。
-        source_line = 'source "${script_dir}/lib/exec-safety.sh"'
-        facts_source_line = 'source "${script_dir}/lib/path-facts.sh"'
+        source_line = self.library_source_pattern('exec-safety.sh')
+        facts_source_line = self.library_source_pattern('path-facts.sh')
         declarations = (
             'python_isolated()',
             'tar_safe()',
@@ -1177,8 +1224,8 @@ class ExecSafetyTest(BootstrapTestCase):
         for stage in self.STAGES:
             with self.subTest(stage=stage.name):
                 body = stage.read_text(encoding='utf-8')
-                self.assertIn(source_line, body)
-                self.assertIn(facts_source_line, body)
+                self.assertRegex(body, source_line)
+                self.assertRegex(body, facts_source_line)
                 self.assertIn('readonly PYTHON_BINARY=/usr/bin/python3', body)
                 self.assertIn('readonly TAR_BINARY=/usr/bin/tar', body)
                 for declaration in declarations:
@@ -1486,7 +1533,7 @@ class ArchiveLibraryTest(BootstrapTestCase):
         self.assertEqual(ARCHIVE_LIB.stat().st_mode & 0o022, 0)
 
         shared = ARCHIVE_LIB.read_text(encoding='utf-8')
-        source_line = 'source "${script_dir}/lib/archive.sh"'
+        source_line = self.library_source_pattern('archive.sh')
         declarations = (
             'array_contains()',
             'safe_archive_member()',
@@ -1500,7 +1547,7 @@ class ArchiveLibraryTest(BootstrapTestCase):
         for stage in (STAGE_ARTIFACTS, INSTALL_CONTAINERD):
             with self.subTest(stage=stage.name):
                 body = stage.read_text(encoding='utf-8')
-                self.assertIn(source_line, body)
+                self.assertRegex(body, source_line)
                 for declaration in declarations:
                     self.assertNotIn(declaration, body, declaration)
                 # 10 私有的两个包装随并集吸收，不得留下孤儿定义。
@@ -1538,11 +1585,11 @@ class KubectlLibraryTest(BootstrapTestCase):
         self.assertIn('/exec-safety.sh"', shared)
         self.assertIn('/admin-conf.sh"', shared)
 
-        source_line = 'source "${script_dir}/lib/kubectl.sh"'
+        source_line = self.library_source_pattern('kubectl.sh')
         for stage in self.STAGES:
             with self.subTest(stage=stage.name):
                 body = stage.read_text(encoding='utf-8')
-                self.assertIn(source_line, body)
+                self.assertRegex(body, source_line)
                 for declaration in self.DECLARATIONS:
                     self.assertNotIn(declaration, body, declaration)
                 # 旧命名一处都不许留：60 曾用 _gate 后缀，改名不彻底会让调用点
@@ -1670,11 +1717,11 @@ class HelmLibraryTest(BootstrapTestCase):
         self.assertIn('/exec-safety.sh"', shared)
         self.assertIn('/kubectl.sh"', shared)
 
-        source_line = 'source "${script_dir}/lib/helm.sh"'
+        source_line = self.library_source_pattern('helm.sh')
         for stage in self.STAGES:
             with self.subTest(stage=stage.name):
                 body = stage.read_text(encoding='utf-8')
-                self.assertIn(source_line, body)
+                self.assertRegex(body, source_line)
                 for declaration in self.DECLARATIONS:
                     self.assertNotIn(declaration + ' {', body, declaration)
                     self.assertNotIn(declaration + ' (', body, declaration)
@@ -2863,8 +2910,12 @@ class BootstrapEntrySecurityTest(BootstrapTestCase):
         就建立在这个前提上，而此前没有任何用例钉住它。钉「第一条可执行语句」而不是
         行号：flag 必须在任何命令与任何 source 之前生效，注释与空行不算。
         """
-        scripts = sorted(BOOTSTRAP_ALL.parent.glob('*.sh'))
-        self.assertGreaterEqual(len(scripts), 8, '入口脚本集合异常')
+        # stage 走表（迁移后不在 bootstrap/ 顶层），非 stage 入口仍按通配收集。
+        scripts = sorted(
+            {ROOT / path for path in STAGE_SCRIPTS.values()}
+            | set(BOOTSTRAP_ALL.parent.glob('*.sh'))
+        )
+        self.assertGreaterEqual(len(scripts), 11, '入口脚本集合异常')
         for script in scripts:
             with self.subTest(script=script.name):
                 # 只钉 flag，不钉 shebang：00-50 用 #!/usr/bin/env bash、60/90 用
@@ -4085,12 +4136,14 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
         )
         self.assertEqual(gated_dir, str(real_library_dir))
 
-        stage_scripts = sorted(bootstrap_dir.glob('[0-9]*.sh'))
-        self.assertEqual(
-            [script.name for script in stage_scripts],
-            sorted(self.stage_names.values()),
-            '真实 stage 脚本集合与编排器的 stage 映射不一致',
-        )
+        # 迁移后 `[0-9]*.sh` 会静默少枚举——枚举型断言通过 0 个文件是本仓库反复
+        # 出现的「测试恒绿、生产必停」形态（账本 R5）。改从表枚举并钉住数量；
+        # 表本身与编排器 stage_path() 的一致性由
+        # CommonLibraryTest.test_stage_paths_come_from_one_table 交叉校验。
+        stage_scripts = sorted(ROOT / path for path in STAGE_SCRIPTS.values())
+        self.assertEqual(len(stage_scripts), 8, [str(s) for s in stage_scripts])
+        for script in stage_scripts:
+            self.assertTrue(script.is_file(), script)
         sourced: set[str] = set()
         for script in stage_scripts:
             names = self.sourced_names_inside_gate(script, gated_dir)

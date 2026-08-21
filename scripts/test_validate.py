@@ -735,6 +735,14 @@ class ValidateEntrypointTest(unittest.TestCase):
         ):
             shutil.copy2(validator.ROOT / 'scripts' / entrypoint, scripts)
 
+        # validate-static.sh 递归收集 scripts/bootstrap 下的 shell 脚本；fixture 必须
+        # 建出这个目录，否则 find 报错、静态入口整体失败，而那与被测契约无关。
+        bootstrap = scripts / 'bootstrap'
+        bootstrap.mkdir()
+        (bootstrap / 'sample.sh').write_text(
+            '#!/bin/bash\nset -Eeuo pipefail\n', encoding='utf-8'
+        )
+
         self.command_log = self.root / 'commands.log'
         self.fake_bin = self.root / 'bin'
         self.fake_bin.mkdir()

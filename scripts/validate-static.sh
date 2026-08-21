@@ -36,6 +36,6 @@ fi
 # 守卫（它排在测试变量守卫之前），本地恒红而 CI 全绿。-B 只作用于本进程。
 python3 -B -c 'import yaml'
 python3 -B "$repo_root/scripts/validate.py"
-shellcheck \
-  "$repo_root"/scripts/bootstrap/lib/*.sh \
-  "$repo_root"/scripts/bootstrap/*.sh
+# 递归收集：stage 迁进 stages/<NN-name>/ 后，写死的两层通配会静默漏掉它们——
+# 静态门禁少检查文件不会报错，只会安静地不再守。find 让新增的子目录自动纳入。
+find "$repo_root/scripts/bootstrap" -type f -name '*.sh' -exec shellcheck {} +

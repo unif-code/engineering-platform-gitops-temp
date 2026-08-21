@@ -532,8 +532,8 @@ CONFIG_SHA256=$(host_pin kubeadm-init.yaml) ||
 readonly CONFIG_SHA256
 readonly CONFIG_FILE="${HOST_CONFIG_DIR}/kubeadm-init.yaml"
 
-kernel_script="${script_dir}/20-prepare-kernel.sh"
-containerd_script="${script_dir}/30-install-containerd.sh"
+kernel_script="${script_dir}/stages/20-prepare-kernel/run.sh"
+containerd_script="${script_dir}/stages/30-install-containerd/run.sh"
 kubernetes_script="${script_dir}/40-install-kubernetes.sh"
 cidr_script="${script_dir}/check_cidrs.py"
 config_source=$CONFIG_FILE

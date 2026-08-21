@@ -22,13 +22,16 @@ else
 fi
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-repo_root=$(cd "${script_dir}/../.." && pwd -P)
+# run.sh 比原来的平铺位置深两层；lib/ 与 check_cidrs.py 仍留在
+# scripts/bootstrap/ 下，因此一律以 bootstrap_dir 为锚点。
+bootstrap_dir=$(cd "${script_dir}/../.." && pwd -P)
+repo_root=$(cd "${bootstrap_dir}/../.." && pwd -P)
 # shellcheck disable=SC1091
-source "${script_dir}/lib/common.sh"
+source "${bootstrap_dir}/lib/common.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/path-facts.sh"
+source "${bootstrap_dir}/lib/path-facts.sh"
 # shellcheck disable=SC1091
-source "${script_dir}/lib/archive.sh"
+source "${bootstrap_dir}/lib/archive.sh"
 
 # PHASE 由公共 evidence helper 间接读取。
 # shellcheck disable=SC2034

@@ -104,7 +104,7 @@ containerd_gate_is_exact() {
     set +e
     cd "$script_dir" || exit 30
     BASH_ENV='' ENV='' PYTHONDONTWRITEBYTECODE=1 \
-      /bin/bash -p "${script_dir}/30-install-containerd.sh" --check 2>&1
+      /bin/bash -p "${script_dir}/stages/30-install-containerd/run.sh" --check 2>&1
     printf '__EXIT_CODE__=%s\n' "$?"
   )
   [[ "$captured" == "${CONTAINERD_TRANSCRIPT}"$'\n__EXIT_CODE__=0' ]]

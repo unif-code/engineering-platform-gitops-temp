@@ -304,6 +304,21 @@ stage_is_mutating() {
   return 1
 }
 
+# 进度写 stderr。stdout 是逐字节的机器契约（STAGE_*_RESULT / PHASE= / RESULT= …），
+# 掺进人看的行会破坏既有断言与下游解析；stderr 则本来就用于诊断。
+# 刻意不使用 STAGE_NN_ 前缀：那是摘要字段的命名空间，混用会让
+# 「失败的 stage 不得出现摘要行」这类断言失去意义。
+report_progress() {
+  local stage=$1 operation=$2 phase=$3 result=$4
+  if [[ "$phase" == begin ]]; then
+    printf '[%s/%s] stage %s %s ...\n' \
+      "$stage_index" "${#STAGES[@]}" "$stage" "$operation" >&2
+    return
+  fi
+  printf '[%s/%s] stage %s %s -> %s\n' \
+    "$stage_index" "${#STAGES[@]}" "$stage" "$operation" "$result" >&2
+}
+
 record_stage_summary() {
   SUMMARY_STAGE[SUMMARY_COUNT]=$1
   SUMMARY_RESULT[SUMMARY_COUNT]=$STAGE_RESULT
@@ -456,42 +471,55 @@ if [[ "$MODE" == APPLY ]]; then
   acquire_lock "$lock_uid"
 fi
 
+stage_index=0
 for stage in "${STAGES[@]}"; do
+  stage_index=$((stage_index + 1))
+  report_progress "$stage" check begin ''
   set +e
   run_stage "$stage" check
   rc=$?
   set -e
-  (( rc == 0 )) || exit "$rc"
+  (( rc == 0 )) ||
+    finish_orchestrator STOP_STAGE "stage-${stage}-check-stopped" "$rc" "$stage"
 
   if check_result_is_complete "$stage" "$STAGE_RESULT"; then
+    report_progress "$stage" check end "$STAGE_RESULT"
     record_stage_summary "$stage"
     continue
   fi
   if [[ "$MODE" == CHECK ]] &&
      check_result_requires_apply "$stage" "$STAGE_RESULT"; then
+    report_progress "$stage" check end "$STAGE_RESULT"
     record_stage_summary "$stage"
     finish_orchestrator PASS_BOOTSTRAP_CHECK apply-required 0 "$stage"
   fi
   if [[ "$MODE" == APPLY ]] &&
      check_result_requires_apply "$stage" "$STAGE_RESULT"; then
+    report_progress "$stage" check end "$STAGE_RESULT"
     record_stage_summary "$stage"
     stage_is_mutating "$stage" || stop_orchestrator invalid-stage-result 30
+    report_progress "$stage" apply begin ''
     set +e
     run_stage "$stage" apply
     rc=$?
     set -e
-    (( rc == 0 )) || exit "$rc"
+    (( rc == 0 )) ||
+      finish_orchestrator STOP_STAGE "stage-${stage}-apply-stopped" "$rc" "$stage"
     apply_result_is_success "$stage" "$STAGE_RESULT" ||
       stop_orchestrator invalid-apply-result 30
+    report_progress "$stage" apply end "$STAGE_RESULT"
     record_stage_summary "$stage"
 
+    report_progress "$stage" postcheck begin ''
     set +e
     run_stage "$stage" check
     rc=$?
     set -e
-    (( rc == 0 )) || exit "$rc"
+    (( rc == 0 )) ||
+      finish_orchestrator STOP_STAGE "stage-${stage}-postcheck-stopped" "$rc" "$stage"
     [[ "$STAGE_RESULT" == ALREADY_COMPLIANT ]] ||
       stop_orchestrator post-apply-check-not-compliant 30
+    report_progress "$stage" postcheck end "$STAGE_RESULT"
     record_stage_summary "$stage"
     continue
   fi

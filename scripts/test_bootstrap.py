@@ -3786,7 +3786,56 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
         diagnostics = result.stdout + result.stderr
         self.assertIn('stage-40-stdout-stop', diagnostics)
         self.assertIn('stage-40-stderr-stop', diagnostics)
+        # 停在 40 的 stage 自身不得出现摘要行——它没有成功，没有结果可记。
         self.assertNotIn('STAGE_40_', diagnostics)
+        # 但 00–30 已经跑完并记账了。裸 exit 会把这些连同尾块一起丢掉，
+        # 而它们正是运维定位问题时唯一的证据（证据路径与 digest 都在里面）。
+        self.assertIn('STAGE_00_RESULT=PASS_PREFLIGHT', result.stdout)
+        self.assertIn('STAGE_30_RESULT=PASS_CONTAINERD_INSTALLED', result.stdout)
+        self.assertIn('STAGE_30_EVIDENCE=', result.stdout)
+        self.assertIn('STAGE_30_SHA256=', result.stdout)
+        self.assertIn('PHASE=bootstrap-all', result.stdout)
+        self.assertIn('RESULT=STOP_STAGE', result.stdout)
+        self.assertIn('REASON=stage-40-check-stopped', result.stdout)
+        self.assertIn('EXIT_CODE=20', result.stdout)
+        self.assertNotIn(self.canary, diagnostics)
+
+    def test_stage_exit_code_propagates_with_summary_intact(self) -> None:
+        """stage 的原始退出码必须原样传递，且不因补打摘要而被覆盖。"""
+        for code in (10, 50):
+            with self.subTest(code=code):
+                self.environment = self.base_environment.copy()
+                self.environment['FAKE_STAGE_STOP'] = f'40:{code}'
+
+                result = self.run_orchestrator('--apply')
+
+                self.assertEqual(result.returncode, code)
+                self.assertIn(f'EXIT_CODE={code}', result.stdout)
+                self.assertIn('RESULT=STOP_STAGE', result.stdout)
+                self.assertIn('STAGE_00_RESULT=PASS_PREFLIGHT', result.stdout)
+                self.assertNotIn('STAGE_40_', result.stdout + result.stderr)
+
+    def test_progress_is_on_stderr_and_stdout_stays_a_contract(self) -> None:
+        """进度给人看，走 stderr；stdout 是逐字段的机器契约，一个字节都不掺。"""
+        result = self.run_orchestrator('--apply')
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for line in (
+            '[1/8] stage 00 check ...',
+            '[1/8] stage 00 check -> PASS_PREFLIGHT',
+            '[5/8] stage 40 check -> PASS_KUBERNETES_CHECK',
+            '[5/8] stage 40 apply ...',
+            '[5/8] stage 40 apply -> PASS_KUBERNETES_INSTALLED',
+            '[5/8] stage 40 postcheck -> ALREADY_COMPLIANT',
+            '[8/8] stage 90 check -> PASS_BOOTSTRAP_VERIFIED',
+        ):
+            self.assertIn(line, result.stderr)
+        # 进度行一旦漏进 stdout，下游解析与既有逐字段断言都会被打乱。
+        for index in range(1, 9):
+            self.assertNotIn(f'[{index}/8]', result.stdout)
+        # 进度行只回显编排器自己掌握的事实，不含 stage 自由文本与终端控制序列。
+        self.assertNotIn(self.canary, result.stdout + result.stderr)
+        self.assertNotIn('\x1b', result.stdout + result.stderr)
 
     def test_zero_exit_with_malformed_result_stops_unknown(self) -> None:
         self.environment['FAKE_STAGE_MALFORMED'] = '40:duplicate-result'
@@ -12474,9 +12523,7 @@ operator:
         """收窄的正面：集群里存在别人装的 release 时，我们自己的判定不受影响。"""
         environment, host, command_log, _ = self.make_environment()
         self.install_full_cluster_contract(environment, host)
-        Path(environment['FAKE_SECRET_EXACT_JSON']).write_text(
-            self.helm_secret_json(extra=True), encoding='utf-8'
-        )
+        environment['FAKE_HELM_SECRET_STATE'] = 'extra'
         environment['FAKE_HELM_LIST_JSON'] = self.helm_list_entries(
             foreign=True
         )
@@ -15338,7 +15385,7 @@ class FinalVerifyTest(BootstrapTestCase):
         cases = (
             'binary', 'shadow', 'archive-digest', 'version', 'list-failure',
             'chart', 'app-version', 'revision-type', 'updated-empty',
-            'extra-release', 'storage-missing-modified-at',
+            'shadow-cilium-release', 'storage-missing-modified-at',
             'storage-created-at-only', 'storage-modified-at',
             'storage-release-data',
         )
@@ -15375,9 +15422,12 @@ class FinalVerifyTest(BootstrapTestCase):
                     environment['FAKE_HELM_LIST_JSON'] = self.helm_list_json(
                         updated=''
                     )
-                elif case == 'extra-release':
+                elif case == 'shadow-cilium-release':
+                    # 收窄后「集群里多一个别人的 release」是正常的，不再判死；
+                    # 但多出一个**同名 cilium**（例如装到了别的 namespace）
+                    # 属于影子 release，必须继续被抓。
                     payload = json.loads(self.helm_list_json())
-                    payload.append(dict(payload[0], name='unknown'))
+                    payload.append(dict(payload[0], namespace='other'))
                     environment['FAKE_HELM_LIST_JSON'] = json.dumps(payload)
                 else:
                     payload = json.loads(environment['FAKE_RELEASE_JSON'])

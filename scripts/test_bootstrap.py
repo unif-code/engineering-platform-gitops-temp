@@ -12573,6 +12573,61 @@ operator:
                     self.assertNotIn(' install ', commands)
                 self.assertNotIn(self.canary, result.stdout + result.stderr)
 
+    def test_unknown_cluster_state_names_the_blocking_component(self) -> None:
+        """复合判定停止时必须说清是哪一个分量。
+
+        2026-08-21 服务器上七个子状态坍缩成一句
+        gateway-cilium-cluster-state-unknown，且停止时一个分量都没记录
+        （log_evidence 全在判定全绿之后），定位只能另跑一轮只读普查。
+        """
+        environment, host, _, _ = self.make_environment()
+        self.install_full_cluster_contract(environment, host)
+        Path(environment['FAKE_SECRET_EXACT_JSON']).write_text(
+            self.helm_secret_json(upgraded=True), encoding='utf-8'
+        )
+
+        result = self.run_stage(environment)
+
+        self.assertEqual(result.returncode, 30, result.stderr)
+        self.assertIn(
+            'REASON=gateway-cilium-cluster-state-unknown', result.stdout
+        )
+        self.assertIn('CLUSTER_STATE=UNKNOWN', result.stdout)
+        # 阻塞点被指名，其余分量如实为 COMPLIANT——两边都要，否则报告没有定位价值：
+        # 全报 UNKNOWN 和全不报一样没用。
+        self.assertIn('HELM_SECRET_STATE=UNKNOWN', result.stdout)
+        for component in (
+            'KUBE_PROXY_STATE', 'HELM_BINARY_STATE', 'GATEWAY_STATE',
+            'CILIUM_WORKLOAD_STATE', 'ENVOY_DAEMONSET_STATE',
+            'ENVOY_PODS_STATE', 'CILIUM_CONFIG_STATE', 'HELM_RELEASE_STATE',
+        ):
+            self.assertIn(f'{component}=COMPLIANT', result.stdout)
+        self.assertNotIn(self.canary, result.stdout + result.stderr)
+
+    def test_early_return_reports_components_as_unqueried(self) -> None:
+        """kube_proxy 判定失败会让 load_cluster_state 提前 return，其余分量根本没查。
+
+        报告必须如实说 UNKNOWN，而不是沿用上一轮的值——也不能因为变量未绑定而
+        撞上 set -u。这里其余分量在 fixture 里本来都是好的，报告仍须说 UNKNOWN：
+        「没查」与「查了但不对」是两回事，混同会把运维引向错误的方向。
+        """
+        environment, host, _, _ = self.make_environment()
+        self.install_full_cluster_contract(environment, host)
+        environment['FAKE_KUBE_PROXY_DAEMONSET'] = 'daemonset.apps/kube-proxy\n'
+
+        result = self.run_stage(environment)
+
+        self.assertEqual(result.returncode, 30, result.stderr)
+        self.assertIn('CLUSTER_STATE=UNKNOWN', result.stdout)
+        self.assertIn('KUBE_PROXY_STATE=UNKNOWN', result.stdout)
+        for component in (
+            'GATEWAY_STATE', 'HELM_SECRET_STATE', 'CILIUM_WORKLOAD_STATE',
+            'ENVOY_DAEMONSET_STATE', 'ENVOY_PODS_STATE',
+            'CILIUM_CONFIG_STATE', 'HELM_RELEASE_STATE',
+        ):
+            self.assertIn(f'{component}=UNKNOWN', result.stdout)
+        self.assertNotIn(self.canary, result.stdout + result.stderr)
+
     def test_rejects_invalid_official_helm_storage_labels(self) -> None:
         for mutation in (
             'missing-modified-at', 'created-at-only',

@@ -475,10 +475,8 @@ stage_index=0
 for stage in "${STAGES[@]}"; do
   stage_index=$((stage_index + 1))
   report_progress "$stage" check begin ''
-  set +e
-  run_stage "$stage" check
-  rc=$?
-  set -e
+  rc=0
+  run_stage "$stage" check || rc=$?
   (( rc == 0 )) ||
     finish_orchestrator STOP_STAGE "stage-${stage}-check-stopped" "$rc" "$stage"
 
@@ -499,10 +497,8 @@ for stage in "${STAGES[@]}"; do
     record_stage_summary "$stage"
     stage_is_mutating "$stage" || stop_orchestrator invalid-stage-result 30
     report_progress "$stage" apply begin ''
-    set +e
-    run_stage "$stage" apply
-    rc=$?
-    set -e
+    rc=0
+    run_stage "$stage" apply || rc=$?
     (( rc == 0 )) ||
       finish_orchestrator STOP_STAGE "stage-${stage}-apply-stopped" "$rc" "$stage"
     apply_result_is_success "$stage" "$STAGE_RESULT" ||
@@ -511,10 +507,8 @@ for stage in "${STAGES[@]}"; do
     record_stage_summary "$stage"
 
     report_progress "$stage" postcheck begin ''
-    set +e
-    run_stage "$stage" check
-    rc=$?
-    set -e
+    rc=0
+    run_stage "$stage" check || rc=$?
     (( rc == 0 )) ||
       finish_orchestrator STOP_STAGE "stage-${stage}-postcheck-stopped" "$rc" "$stage"
     [[ "$STAGE_RESULT" == ALREADY_COMPLIANT ]] ||

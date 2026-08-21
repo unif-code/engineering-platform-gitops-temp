@@ -124,12 +124,38 @@ readonly -a GATEWAY_OBJECTS=(
 # trap 间接调用；只清理受验证的同目录 Helm 临时文件。
 # shellcheck disable=SC2329
 
+# 复合判定的分量。停止时逐条报告，运维才不必再跑一轮人工普查去猜是哪一个。
+# 取值域封闭在 COMPLIANT/MISSING/UNKNOWN，不含任何来自集群的自由文本。
+report_cluster_state() {
+  log_evidence "CLUSTER_STATE=${CLUSTER_STATE}"
+  log_evidence "KUBE_PROXY_STATE=${KUBE_PROXY_STATE}"
+  log_evidence "HELM_BINARY_STATE=${1}"
+  log_evidence "GATEWAY_STATE=${GATEWAY_STATE}"
+  log_evidence "HELM_SECRET_STATE=${HELM_SECRET_STATE}"
+  log_evidence "CILIUM_WORKLOAD_STATE=${CILIUM_WORKLOAD_STATE}"
+  log_evidence "ENVOY_DAEMONSET_STATE=${ENVOY_DAEMONSET_STATE}"
+  log_evidence "ENVOY_PODS_STATE=${ENVOY_PODS_STATE}"
+  log_evidence "CILIUM_CONFIG_STATE=${CILIUM_CONFIG_STATE}"
+  log_evidence "HELM_RELEASE_STATE=${HELM_RELEASE_STATE}"
+}
+
 load_cluster_state() {
   local helm_state=$1
+  # kube_proxy_absent 失败时下面整段都不会跑；先给全部分量确定初值，
+  # 报告才不会撞上 set -u，且「没查到」如实呈现为 UNKNOWN。
+  KUBE_PROXY_STATE=UNKNOWN
+  GATEWAY_STATE=UNKNOWN
+  HELM_SECRET_STATE=UNKNOWN
+  CILIUM_WORKLOAD_STATE=UNKNOWN
+  ENVOY_DAEMONSET_STATE=UNKNOWN
+  ENVOY_PODS_STATE=UNKNOWN
+  CILIUM_CONFIG_STATE=UNKNOWN
+  HELM_RELEASE_STATE=UNKNOWN
   kube_proxy_absent || {
     CLUSTER_STATE=UNKNOWN
     return
   }
+  KUBE_PROXY_STATE=COMPLIANT
   GATEWAY_STATE=$(gateway_bundle_state) || GATEWAY_STATE=UNKNOWN
   HELM_SECRET_STATE=$(helm_secret_state) || HELM_SECRET_STATE=UNKNOWN
   CILIUM_WORKLOAD_STATE=$(cilium_workload_state) || CILIUM_WORKLOAD_STATE=UNKNOWN
@@ -231,7 +257,10 @@ helm_state=$(helm_binary_state)
 [[ "$helm_state" != ARCHIVE_UNSAFE ]] || complete STOP_SUPPLY_CHAIN_MISMATCH helm-archive-unsafe "$EXIT_SUPPLY_CHAIN" NONE
 [[ "$helm_state" != UNKNOWN ]] || complete STOP_UNKNOWN_STATE helm-binary-or-shadow-unknown "$EXIT_UNKNOWN_STATE" NONE
 load_cluster_state "$helm_state"
-[[ "$CLUSTER_STATE" != UNKNOWN ]] || complete STOP_UNKNOWN_STATE gateway-cilium-cluster-state-unknown "$EXIT_UNKNOWN_STATE" NONE
+[[ "$CLUSTER_STATE" != UNKNOWN ]] || {
+  report_cluster_state "$helm_state"
+  complete STOP_UNKNOWN_STATE gateway-cilium-cluster-state-unknown "$EXIT_UNKNOWN_STATE" NONE
+}
 
 if [[ "$CLUSTER_STATE" == COMPLIANT ]]; then
   complete ALREADY_COMPLIANT cilium-ready 0 'stages/90-verify/run.sh --check'
@@ -269,7 +298,10 @@ managed_kubectl_gate || complete STOP_UNKNOWN_STATE kubectl-provenance-raced "$E
 admin_conf_is_safe || complete STOP_UNKNOWN_STATE admin-conf-metadata-raced "$EXIT_UNKNOWN_STATE" NONE
 api_endpoint_is_exact || complete STOP_UNKNOWN_STATE api-endpoint-raced "$EXIT_UNKNOWN_STATE" NONE
 load_cluster_state "$helm_state"
-[[ "$CLUSTER_STATE" == APPLY_REQUIRED ]] || complete STOP_UNKNOWN_STATE pre-gateway-cluster-state-raced "$EXIT_UNKNOWN_STATE" NONE
+[[ "$CLUSTER_STATE" == APPLY_REQUIRED ]] || {
+  report_cluster_state "$helm_state"
+  complete STOP_UNKNOWN_STATE pre-gateway-cluster-state-raced "$EXIT_UNKNOWN_STATE" NONE
+}
 
 if [[ "$GATEWAY_STATE" == MISSING ]]; then
   managed_kubectl_gate || complete STOP_UNKNOWN_STATE kubectl-raced-before-gateway "$EXIT_UNKNOWN_STATE" NONE
@@ -289,8 +321,10 @@ if [[ "$GATEWAY_STATE" == MISSING ]]; then
   admin_conf_is_safe || complete STOP_UNKNOWN_STATE admin-conf-raced-after-gateway "$EXIT_UNKNOWN_STATE" NONE
   api_endpoint_is_exact || complete STOP_UNKNOWN_STATE api-endpoint-raced-after-gateway "$EXIT_UNKNOWN_STATE" NONE
   load_cluster_state "$helm_state"
-  [[ "$CLUSTER_STATE" == APPLY_REQUIRED && "$GATEWAY_STATE" == COMPLIANT ]] ||
+  [[ "$CLUSTER_STATE" == APPLY_REQUIRED && "$GATEWAY_STATE" == COMPLIANT ]] || {
+    report_cluster_state "$helm_state"
     complete STOP_UNKNOWN_STATE gateway-post-apply-state-unknown "$EXIT_UNKNOWN_STATE" NONE
+  }
 fi
 
 staged_inputs_gate || complete STOP_SUPPLY_CHAIN_MISMATCH staged-input-raced-before-helm "$EXIT_SUPPLY_CHAIN" NONE
@@ -302,8 +336,10 @@ kube_proxy_absent || complete STOP_UNKNOWN_STATE kube-proxy-state-raced "$EXIT_U
 helm_state=$(helm_binary_state)
 [[ "$helm_state" == COMPLIANT ]] || complete STOP_UNKNOWN_STATE helm-binary-raced-before-install "$EXIT_UNKNOWN_STATE" NONE
 load_cluster_state "$helm_state"
-[[ "$CLUSTER_STATE" == APPLY_REQUIRED && "$GATEWAY_STATE" == COMPLIANT ]] ||
+[[ "$CLUSTER_STATE" == APPLY_REQUIRED && "$GATEWAY_STATE" == COMPLIANT ]] || {
+  report_cluster_state "$helm_state"
   complete STOP_UNKNOWN_STATE pre-helm-cluster-state-raced "$EXIT_UNKNOWN_STATE" NONE
+}
 staged_inputs_gate || complete STOP_SUPPLY_CHAIN_MISMATCH staged-input-raced-at-helm "$EXIT_SUPPLY_CHAIN" NONE
 apply_snapshot_gate || complete STOP_SUPPLY_CHAIN_MISMATCH apply-input-snapshot-raced-at-helm "$EXIT_SUPPLY_CHAIN" NONE
 helm_state=$(helm_binary_state)
@@ -329,8 +365,10 @@ post_install_deadline=$(( SECONDS + post_install_timeout ))
 while :; do
   load_cluster_state "$helm_state"
   [[ "$CLUSTER_STATE" != COMPLIANT ]] || break
-  (( SECONDS < post_install_deadline )) ||
+  (( SECONDS < post_install_deadline )) || {
+    report_cluster_state "$helm_state"
     complete STOP_VERIFY_FAILED cilium-post-install-state-invalid "$EXIT_VERIFY_FAILED" NONE
+  }
   sleep "$post_install_interval"
 done
 

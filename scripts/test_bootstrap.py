@@ -526,6 +526,28 @@ class CommonLibraryTest(BootstrapTestCase):
             ['/bin/bash', '-c', f'source "$1"\n{body}', 'test-common', str(COMMON)]
         )
 
+    def test_helm_release_scope_is_identical_in_stage_60_and_90(self) -> None:
+        """两处 helm 判定是近似重复而非共享函数，作用域必须防单边漂移。
+
+        子项目 E 因形态差异（60 返回状态字符串、90 返回 0/1）没有收敛这两族。
+        形态可以不同，**作用域**却必须一致：否则会出现 --check 放行而最终验收
+        卡住，或者反过来 —— 两种都是运维现场最难判断的状态。
+        """
+        for stage in ('60', '90'):
+            with self.subTest(stage=stage):
+                text = self.stage_text(stage)
+                # 服务端按 helm 的 name label 筛，而不是把全集群拉回来。
+                self.assertIn('--selector owner=helm,name=cilium', text)
+                # 旧的全集群作用域不得残留。
+                self.assertNotIn('--selector owner=helm --output=json', text)
+                # helm list 侧必须先按 name 过滤再计数；按对象名过滤会漏掉
+                # upgrade 留下的 revision 2。
+                self.assertRegex(
+                    text,
+                    r'\[\w+ for \w+ in items if isinstance\(\w+, dict\)'
+                    r' and \w+\.get\("name"\) == "cilium"\]',
+                )
+
     def test_parse_mode_defaults_to_check(self) -> None:
         result = self.run_common('parse_mode\nprintf "%s\\n" "$MODE"')
 
@@ -11550,14 +11572,20 @@ operator:
             }
         )
 
-    def helm_secret_json(self, *, extra: bool = False) -> str:
+    def helm_secret_json(
+        self,
+        *,
+        extra: bool = False,
+        upgraded: bool = False,
+        namespace: str = 'kube-system',
+    ) -> str:
         items: list[dict[str, object]] = [
             {
                 'apiVersion': 'v1',
                 'kind': 'Secret',
                 'metadata': {
                     'name': 'sh.helm.release.v1.cilium.v1',
-                    'namespace': 'kube-system',
+                    'namespace': namespace,
                     'labels': {
                             'owner': 'helm',
                             'name': 'cilium',
@@ -11584,6 +11612,26 @@ operator:
                         },
                     },
                     'type': 'helm.sh/release.v1',
+                }
+            )
+        if upgraded:
+            # helm upgrade 会留下第二个 revision，它同样带 name=cilium 标签，
+            # 因此服务端 selector 选得到；判定必须据此判 UNKNOWN。
+            items.append(
+                {
+                    'apiVersion': 'v1',
+                    'kind': 'Secret',
+                    'metadata': {
+                        'name': 'sh.helm.release.v1.cilium.v2',
+                        'namespace': namespace,
+                        'labels': {
+                            'owner': 'helm', 'name': 'cilium',
+                            'status': 'deployed', 'version': '2',
+                            'modifiedAt': '1786320002',
+                        },
+                    },
+                    'type': 'helm.sh/release.v1',
+                    'data': {'release': 'SECRET_HELM_RELEASE_PAYLOAD'},
                 }
             )
         return json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': items})
@@ -11789,6 +11837,7 @@ operator:
             host / 'usr/bin/kubectl',
             '''
             #!/usr/bin/python3 -B
+            import json
             import os
             from pathlib import Path
             import sys
@@ -11908,9 +11957,12 @@ operator:
                     sys.stdout.write(kube_proxy[key])
                 raise SystemExit(0)
 
-            if command in (
-                ['get', 'secrets', '--all-namespaces', '--selector', 'owner=helm', '--output=json'],
-                ['get', 'secrets,configmaps', '--all-namespaces', '--selector', 'owner=helm', '--output=json'],
+            if (
+                len(command) == 6 and command[0] == 'get'
+                and command[1] == 'secrets,configmaps'
+                and command[2] == '--all-namespaces'
+                and command[3] == '--selector'
+                and command[5] == '--output=json'
             ):
                 state = os.environ.get('FAKE_HELM_SECRET_STATE', '')
                 if state == 'failure':
@@ -11922,7 +11974,21 @@ operator:
                 else:
                     print('{"apiVersion":"v1","kind":"List","items":[]}')
                     raise SystemExit(0)
-                sys.stdout.write(Path(path).read_text(encoding='utf-8'))
+                document = json.loads(Path(path).read_text(encoding='utf-8'))
+                # 忠实执行服务端 label selector：真实 kubectl 不会把不匹配的
+                # 对象交给调用方。若这里原样回放，判定收窄就等于没被测到。
+                wanted = dict(
+                    pair.split('=', 1) for pair in command[4].split(',')
+                )
+                document['items'] = [
+                    item for item in document['items']
+                    if all(
+                        item.get('metadata', {}).get('labels', {}).get(key)
+                        == value
+                        for key, value in wanted.items()
+                    )
+                ]
+                sys.stdout.write(json.dumps(document))
                 raise SystemExit(0)
 
             unscoped_bundle_get = [
@@ -12340,9 +12406,9 @@ operator:
                 self.assertFalse((host / 'usr/local/bin/helm').exists())
                 self.assertFalse(command_log.exists())
 
-    def test_rejects_kube_proxy_unknown_release_or_partial_state(self) -> None:
+    def test_rejects_kube_proxy_or_partial_state(self) -> None:
         cases = (
-            'kube-proxy', 'unknown-release', 'gateway-partial',
+            'kube-proxy', 'gateway-partial',
             'gateway-annotation-extra', 'cilium-partial',
         )
         for case in cases:
@@ -12352,8 +12418,6 @@ operator:
                     environment['FAKE_KUBE_PROXY_DAEMONSET'] = (
                         'daemonset.apps/kube-proxy\n'
                     )
-                elif case == 'unknown-release':
-                    environment['FAKE_HELM_SECRET_STATE'] = 'extra'
                 elif case == 'gateway-partial':
                     environment['FAKE_GATEWAY_STATE'] = 'partial'
                 elif case == 'gateway-annotation-extra':
@@ -12375,6 +12439,91 @@ operator:
                 commands = command_log.read_text(encoding='utf-8')
                 self.assertNotIn(' install ', commands)
                 self.assertNotIn(' apply ', commands)
+                self.assertNotIn(self.canary, result.stdout + result.stderr)
+
+    def helm_list_entries(
+        self, *, foreign: bool = False, **overrides: object
+    ) -> str:
+        cilium: dict[str, object] = {
+            'name': 'cilium',
+            'namespace': 'kube-system',
+            'revision': '1',
+            'updated': '2026-08-10 00:00:00.000000000 +0000 UTC',
+            'status': 'deployed',
+            'chart': 'cilium-1.20.0',
+            'app_version': '1.20.0',
+        }
+        cilium.update(overrides)
+        entries: list[dict[str, object]] = [cilium]
+        if foreign:
+            # 其他运维同事装的 release：与本 stage 无关，不得影响判定。
+            entries.append(
+                {
+                    'name': 'example-node-gitlab-runner',
+                    'namespace': 'gitlab-runner',
+                    'revision': '1',
+                    'updated': '2026-08-19 00:00:00.000000000 +0000 UTC',
+                    'status': 'deployed',
+                    'chart': 'gitlab-runner-0.79.0',
+                    'app_version': '18.5.0',
+                }
+            )
+        return json.dumps(entries)
+
+    def test_foreign_helm_release_does_not_affect_cilium_verdict(self) -> None:
+        """收窄的正面：集群里存在别人装的 release 时，我们自己的判定不受影响。"""
+        environment, host, command_log, _ = self.make_environment()
+        self.install_full_cluster_contract(environment, host)
+        Path(environment['FAKE_SECRET_EXACT_JSON']).write_text(
+            self.helm_secret_json(extra=True), encoding='utf-8'
+        )
+        environment['FAKE_HELM_LIST_JSON'] = self.helm_list_entries(
+            foreign=True
+        )
+
+        result = self.run_stage(environment)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('RESULT=ALREADY_COMPLIANT', result.stdout)
+        commands = command_log.read_text(encoding='utf-8')
+        # 收窄必须落在服务端 selector 上；把全集群拉回来再客户端过滤是另一回事。
+        self.assertIn('--selector owner=helm,name=cilium', commands)
+        self.assertNotIn('--selector owner=helm --output=json', commands)
+
+    def test_narrowed_helm_scope_still_rejects_cilium_drift(self) -> None:
+        """收窄的反面：作用域变小，但对 cilium 自身的检测能力一点不能少。
+
+        其中 second-revision 是本设计的核心风险用例——若把过滤写成按对象名匹配
+        `sh.helm.release.v1.cilium.v1`，upgrade 留下的 v2 就完全不可见，本用例
+        会变绿；它变红才说明收窄没有打开升级盲区。
+        """
+        cases = ('second-revision', 'wrong-namespace', 'list-revision-drift')
+        for case in cases:
+            with self.subTest(case=case):
+                environment, host, command_log, _ = self.make_environment()
+                self.install_full_cluster_contract(environment, host)
+                secret = Path(environment['FAKE_SECRET_EXACT_JSON'])
+                if case == 'second-revision':
+                    secret.write_text(
+                        self.helm_secret_json(upgraded=True), encoding='utf-8'
+                    )
+                elif case == 'wrong-namespace':
+                    secret.write_text(
+                        self.helm_secret_json(namespace='default'),
+                        encoding='utf-8',
+                    )
+                else:
+                    environment['FAKE_HELM_LIST_JSON'] = (
+                        self.helm_list_entries(foreign=True, revision='2')
+                    )
+
+                result = self.run_stage(environment)
+
+                self.assertEqual(result.returncode, 30, result.stderr)
+                self.assertIn('RESULT=STOP_UNKNOWN_STATE', result.stdout)
+                if command_log.exists():
+                    commands = command_log.read_text(encoding='utf-8')
+                    self.assertNotIn(' install ', commands)
                 self.assertNotIn(self.canary, result.stdout + result.stderr)
 
     def test_rejects_invalid_official_helm_storage_labels(self) -> None:
@@ -13435,7 +13584,9 @@ class FinalVerifyTest(BootstrapTestCase):
             archive.addfile(entry, io.BytesIO(member))
         return stream.getvalue()
 
-    def helm_list_json(self, **overrides: object) -> str:
+    def helm_list_json(
+        self, *, foreign: bool = False, **overrides: object
+    ) -> str:
         release: dict[str, object] = {
             'name': 'cilium',
             'namespace': 'kube-system',
@@ -13446,7 +13597,21 @@ class FinalVerifyTest(BootstrapTestCase):
             'app_version': '1.20.0',
         }
         release.update(overrides)
-        return json.dumps([release])
+        entries: list[dict[str, object]] = [release]
+        if foreign:
+            # 其他运维同事装的 release：与本 stage 无关，不得影响判定。
+            entries.append(
+                {
+                    'name': 'example-node-gitlab-runner',
+                    'namespace': 'gitlab-runner',
+                    'revision': '1',
+                    'updated': '2026-08-19 00:00:00.000000000 +0000 UTC',
+                    'status': 'deployed',
+                    'chart': 'gitlab-runner-0.79.0',
+                    'app_version': '18.5.0',
+                }
+            )
+        return json.dumps(entries)
 
     def gateway_bundle_json(self, *, partial: bool = False) -> str:
         annotations = {
@@ -13496,31 +13661,77 @@ class FinalVerifyTest(BootstrapTestCase):
             items.pop(0)
         return json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': items})
 
-    def release_json(self) -> str:
-        return json.dumps(
+    def release_json(
+        self,
+        *,
+        foreign: bool = False,
+        upgraded: bool = False,
+        namespace: str = 'kube-system',
+    ) -> str:
+        items: list[dict[str, object]] = [
             {
                 'apiVersion': 'v1',
-                'kind': 'List',
-                'items': [
-                    {
-                        'apiVersion': 'v1',
-                        'kind': 'Secret',
-                        'metadata': {
-                            'name': 'sh.helm.release.v1.cilium.v1',
-                            'namespace': 'kube-system',
-                            'labels': {
-                                'owner': 'helm',
-                                'name': 'cilium',
-                                'status': 'deployed',
-                                'version': '1',
-                                'modifiedAt': '1786320001',
-                            },
-                        },
-                        'type': 'helm.sh/release.v1',
-                        'data': {'release': 'SECRET_HELM_RELEASE_PAYLOAD'},
-                    }
-                ],
+                'kind': 'Secret',
+                'metadata': {
+                    'name': 'sh.helm.release.v1.cilium.v1',
+                    'namespace': namespace,
+                    'labels': {
+                        'owner': 'helm',
+                        'name': 'cilium',
+                        'status': 'deployed',
+                        'version': '1',
+                        'modifiedAt': '1786320001',
+                    },
+                },
+                'type': 'helm.sh/release.v1',
+                'data': {'release': 'SECRET_HELM_RELEASE_PAYLOAD'},
             }
+        ]
+        if foreign:
+            # 其他运维同事装的 release：label name 不是 cilium，服务端 selector
+            # 选不到它，因此不该影响我们自己的判定。
+            items.append(
+                {
+                    'apiVersion': 'v1',
+                    'kind': 'Secret',
+                    'metadata': {
+                        'name': (
+                            'sh.helm.release.v1'
+                            '.example-node-gitlab-runner.v1'
+                        ),
+                        'namespace': 'gitlab-runner',
+                        'labels': {
+                            'owner': 'helm',
+                            'name': 'example-node-gitlab-runner',
+                            'status': 'deployed', 'version': '1',
+                            'modifiedAt': '1786320003',
+                        },
+                    },
+                    'type': 'helm.sh/release.v1',
+                    'data': {'release': 'SECRET_HELM_RELEASE_PAYLOAD'},
+                }
+            )
+        if upgraded:
+            # upgrade 留下的第二个 revision 同样带 name=cilium，selector 选得到。
+            items.append(
+                {
+                    'apiVersion': 'v1',
+                    'kind': 'Secret',
+                    'metadata': {
+                        'name': 'sh.helm.release.v1.cilium.v2',
+                        'namespace': namespace,
+                        'labels': {
+                            'owner': 'helm', 'name': 'cilium',
+                            'status': 'deployed', 'version': '2',
+                            'modifiedAt': '1786320002',
+                        },
+                    },
+                    'type': 'helm.sh/release.v1',
+                    'data': {'release': 'SECRET_HELM_RELEASE_PAYLOAD'},
+                }
+            )
+        return json.dumps(
+            {'apiVersion': 'v1', 'kind': 'List', 'items': items}
         )
 
     def cilium_daemonset_json(self, *, ready: bool = True) -> str:
@@ -14090,6 +14301,7 @@ class FinalVerifyTest(BootstrapTestCase):
             host / 'usr/bin/kubectl',
             '''
             #!/usr/bin/python3 -B
+            import json
             import os
             from pathlib import Path
             import sys
@@ -14177,8 +14389,6 @@ class FinalVerifyTest(BootstrapTestCase):
                 ('version', '--client=true', '--output=json'): ('version', 'FAKE_KUBECTL_VERSION_JSON'),
                 ('config', 'view', '--minify', '--output=jsonpath={.clusters[0].cluster.server}'): ('endpoint', 'FAKE_API_ENDPOINT'),
                 ('get', '--raw=/readyz'): ('readyz', 'FAKE_API_READYZ'),
-                ('get', 'secrets', '--all-namespaces', '--selector', 'owner=helm', '--output=json'): ('legacy-releases', 'FAKE_LEGACY_RELEASE_JSON'),
-                ('get', 'secrets,configmaps', '--all-namespaces', '--selector', 'owner=helm', '--output=json'): ('releases', 'FAKE_RELEASE_JSON'),
                 ('get', 'customresourcedefinitions.apiextensions.k8s.io,validatingadmissionpolicies.admissionregistration.k8s.io,validatingadmissionpolicybindings.admissionregistration.k8s.io', '--output=json'): ('gateway', 'FAKE_GATEWAY_JSON'),
                 ('--namespace', 'kube-system', 'get', 'daemonset/cilium', '--output=json'): ('cilium-daemonset', 'FAKE_CILIUM_DAEMONSET_JSON'),
                 ('--namespace', 'kube-system', 'get', 'pods', '--selector', 'k8s-app=cilium', '--output=json'): ('cilium-pods', 'FAKE_CILIUM_PODS_JSON'),
@@ -14222,6 +14432,29 @@ class FinalVerifyTest(BootstrapTestCase):
                 if os.environ.get('FAKE_KUBECTL_FAIL', '') == 'gateway-diff':
                     raise SystemExit(2)
                 raise SystemExit(int(os.environ.get('FAKE_GATEWAY_DIFF_EXIT', '0')))
+            releases = (
+                'get', 'secrets,configmaps', '--all-namespaces',
+                '--selector', 'owner=helm,name=cilium', '--output=json',
+            )
+            if key == releases:
+                if os.environ.get('FAKE_KUBECTL_FAIL', '') == 'releases':
+                    raise SystemExit(1)
+                document = json.loads(os.environ['FAKE_RELEASE_JSON'])
+                # 忠实执行服务端 label selector，理由同 Stage 60 的 fake：
+                # 原样回放会让判定收窄根本没有被测到。
+                wanted = dict(
+                    pair.split('=', 1) for pair in key[4].split(',')
+                )
+                document['items'] = [
+                    item for item in document['items']
+                    if all(
+                        item.get('metadata', {}).get('labels', {}).get(name)
+                        == value
+                        for name, value in wanted.items()
+                    )
+                ]
+                sys.stdout.write(json.dumps(document))
+                raise SystemExit(0)
             if key not in routes:
                 raise SystemExit(64)
             route, variable = routes[key]
@@ -14349,29 +14582,6 @@ class FinalVerifyTest(BootstrapTestCase):
                 ),
                 'FAKE_API_ENDPOINT': 'https://192.0.2.10:6443',
                 'FAKE_API_READYZ': 'ok\n',
-                'FAKE_LEGACY_RELEASE_JSON': json.dumps(
-                    {
-                        'apiVersion': 'v1',
-                        'kind': 'List',
-                        'items': [
-                            {
-                                'apiVersion': 'v1',
-                                'kind': 'Secret',
-                                'metadata': {
-                                    'name': 'sh.helm.release.v1.cilium.v1',
-                                    'namespace': 'kube-system',
-                                    'labels': {
-                                        'owner': 'helm',
-                                        'name': 'cilium',
-                                        'status': 'deployed',
-                                        'version': '1',
-                                    },
-                                },
-                                'type': 'helm.sh/release.v1',
-                            }
-                        ],
-                    }
-                ),
                 'FAKE_RELEASE_JSON': self.release_json(),
                 'FAKE_GATEWAY_JSON': self.gateway_bundle_json(),
                 'FAKE_CILIUM_DAEMONSET_JSON': self.cilium_daemonset_json(),
@@ -15212,6 +15422,43 @@ class FinalVerifyTest(BootstrapTestCase):
                 environment, host, _ = self.make_environment()
                 environment['FAKE_KUBECTL_FAIL'] = route
                 result = self.run_stage(environment)
+                self.assert_stops_without_evidence(result, host)
+
+    def test_foreign_helm_release_does_not_affect_verify_verdict(self) -> None:
+        """收窄的正面：Stage 90 与 Stage 60 同构，别人装的 release 不影响验收。"""
+        environment, host, command_log = self.make_environment()
+        environment['FAKE_RELEASE_JSON'] = self.release_json(foreign=True)
+        environment['FAKE_HELM_LIST_JSON'] = self.helm_list_json(foreign=True)
+
+        result = self.run_stage(environment)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('RESULT=PASS_BOOTSTRAP_VERIFIED', result.stdout)
+        commands = command_log.read_text(encoding='utf-8')
+        self.assertIn('--selector owner=helm,name=cilium', commands)
+        self.assertNotIn('--selector owner=helm --output=json', commands)
+
+    def test_narrowed_helm_scope_still_rejects_cilium_drift(self) -> None:
+        """收窄的反面：与 Stage 60 同构的三条边界，检测能力一点不能少。"""
+        cases = ('second-revision', 'wrong-namespace', 'list-revision-drift')
+        for case in cases:
+            with self.subTest(case=case):
+                environment, host, _ = self.make_environment()
+                if case == 'second-revision':
+                    environment['FAKE_RELEASE_JSON'] = self.release_json(
+                        upgraded=True
+                    )
+                elif case == 'wrong-namespace':
+                    environment['FAKE_RELEASE_JSON'] = self.release_json(
+                        namespace='default'
+                    )
+                else:
+                    environment['FAKE_HELM_LIST_JSON'] = self.helm_list_json(
+                        foreign=True, revision='2'
+                    )
+
+                result = self.run_stage(environment)
+
                 self.assert_stops_without_evidence(result, host)
 
     def test_rejects_unhealthy_cilium_operator_or_unknown_release(self) -> None:

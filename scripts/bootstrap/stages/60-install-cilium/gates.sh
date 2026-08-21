@@ -431,7 +431,7 @@ else:
 helm_secret_state() {
   local output parsed
   output=$(kubectl_run get secrets,configmaps \
-    --all-namespaces --selector owner=helm --output=json 2>/dev/null) || {
+    --all-namespaces --selector owner=helm,name=cilium --output=json 2>/dev/null) || {
     printf 'UNKNOWN\n'
     return
   }
@@ -707,10 +707,15 @@ except (TypeError, ValueError):
     raise SystemExit(0)
 if not isinstance(items, list):
     print("UNKNOWN")
-elif not items:
+    raise SystemExit(0)
+# 只判定我们自己的 release；同集群可能有其他运维装的 release，与本 stage 无关。
+# 过滤依据是 helm 的 name 字段而非对象名——upgrade 产生的 revision 2 同样带
+# name=cilium，因此仍会被选中，再由下面的 revision 断言判成 UNKNOWN。
+mine = [item for item in items if isinstance(item, dict) and item.get("name") == "cilium"]
+if not mine:
     print("MISSING")
-elif len(items) == 1 and isinstance(items[0], dict):
-    item = items[0]
+elif len(mine) == 1:
+    item = mine[0]
     expected_keys = {"name", "namespace", "revision", "updated", "status", "chart", "app_version"}
     exact = (
         set(item) == expected_keys and

@@ -162,7 +162,7 @@ kube_proxy_is_absent() {
 helm_release_is_exact() {
   local output values_output version
   output=$(kubectl_run get secrets,configmaps --all-namespaces \
-    --selector owner=helm --output=json 2>/dev/null) || return 1
+    --selector owner=helm,name=cilium --output=json 2>/dev/null) || return 1
   printf '%s' "$output" | python_isolated -c '
 import json
 import sys
@@ -206,9 +206,15 @@ import sys
 expected_keys = {"name", "namespace", "revision", "updated", "status", "chart", "app_version"}
 try:
     items = json.load(sys.stdin)
-    if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+    if not isinstance(items, list):
         raise ValueError
-    item = items[0]
+    # 只判定我们自己的 release；同集群可能有其他运维装的 release，与本 stage 无关。
+    # 过滤依据是 helm 的 name 字段而非对象名——upgrade 产生的 revision 2 同样带
+    # name=cilium，因此仍会被选中，再由下面的 revision 断言判成不合规。
+    mine = [i for i in items if isinstance(i, dict) and i.get("name") == "cilium"]
+    if len(mine) != 1:
+        raise ValueError
+    item = mine[0]
     valid = (
         set(item) == expected_keys and item.get("name") == "cilium" and
         item.get("namespace") == "kube-system" and

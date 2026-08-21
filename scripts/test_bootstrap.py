@@ -3495,6 +3495,11 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
               exit "${FAKE_STAGE_STOP#*:}"
             fi
 
+            if [ -n "${FAKE_STAGE_DELAY:-}" ] &&
+               [ "${FAKE_STAGE_DELAY%%:*}" = "$stage" ]; then
+              sleep "${FAKE_STAGE_DELAY#*:}"
+            fi
+
             case "$stage" in
               00)
                 result=PASS_PREFLIGHT
@@ -3836,6 +3841,63 @@ class BootstrapOrchestratorTest(BootstrapTestCase):
         # 进度行只回显编排器自己掌握的事实，不含 stage 自由文本与终端控制序列。
         self.assertNotIn(self.canary, result.stdout + result.stderr)
         self.assertNotIn('\x1b', result.stdout + result.stderr)
+
+    def test_slow_stage_emits_a_liveness_heartbeat(self) -> None:
+        """stage 的输出被整体捕获后才校验，运行期间终端全静默。
+
+        装 kubernetes 这类 stage 要跑几分钟，没有存活信号时运维分不清「在装」
+        还是「卡死」。心跳是在不破坏「捕获后校验」契约的前提下唯一的办法。
+        """
+        self.environment['BOOTSTRAP_ORCHESTRATOR_TEST_HEARTBEAT_SECONDS'] = '1'
+        self.environment['FAKE_STAGE_DELAY'] = '40:3'
+
+        result = self.run_orchestrator('--apply')
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(
+            result.stderr, r'\[5/8\] stage 40 check \.\.\. \d+s elapsed'
+        )
+        # 结束行带累计耗时，事后也能看出哪个 stage 慢。
+        self.assertRegex(
+            result.stderr,
+            r'\[5/8\] stage 40 check -> PASS_KUBERNETES_CHECK \(\d+s\)',
+        )
+        # 心跳必须随 stage 结束而停。没被 kill 掉的话它会变成孤儿，一路刷进
+        # 后续 stage——行数会远超该 stage 的实际时长。这条才是真正的区分点：
+        # 「有心跳」很容易，「心跳能停」才是并发代码的难处。
+        beats = re.findall(
+            r'\[5/8\] stage 40 check \.\.\. (\d+)s elapsed', result.stderr
+        )
+        self.assertTrue(beats)
+        self.assertLessEqual(len(beats), 6, result.stderr)
+        # 心跳同样是给人看的，不得渗进 stdout 契约。
+        self.assertNotIn('elapsed', result.stdout)
+        self.assertNotIn(self.canary, result.stdout + result.stderr)
+
+    def test_heartbeat_seam_is_shape_checked_and_production_only_rejects(
+        self,
+    ) -> None:
+        """心跳间隔进了 sleep 与算术，形状必须先钉死；生产侧该前缀一律拒绝。"""
+        for value in ('0', '-1', '5s', '$(id)', '99999'):
+            with self.subTest(value=value):
+                self.environment = self.base_environment.copy()
+                self.environment[
+                    'BOOTSTRAP_ORCHESTRATOR_TEST_HEARTBEAT_SECONDS'
+                ] = value
+
+                result = self.run_orchestrator('--check')
+
+                self.assertEqual(result.returncode, 10, result.stdout)
+                self.assertIn('REASON=invalid-test-heartbeat', result.stdout)
+
+        production = self.base_environment.copy()
+        del production['BOOTSTRAP_ORCHESTRATOR_TEST_MODE']
+        production['BOOTSTRAP_ORCHESTRATOR_TEST_HEARTBEAT_SECONDS'] = '1'
+
+        result = self.run_orchestrator('--check', environment=production)
+
+        self.assertEqual(result.returncode, 10)
+        self.assertIn('REASON=test-override-in-production', result.stderr)
 
     def test_zero_exit_with_malformed_result_stops_unknown(self) -> None:
         self.environment['FAKE_STAGE_MALFORMED'] = '40:duplicate-result'

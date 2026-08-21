@@ -14,6 +14,11 @@ declare -a SUMMARY_SHA256=()
 SUMMARY_COUNT=0
 git_commit=NONE
 test_mode=false
+stage_index=0
+stage_started=0
+progress_heartbeat_pid=
+readonly PROGRESS_HEARTBEAT_DEFAULT=15
+heartbeat_seconds=$PROGRESS_HEARTBEAT_DEFAULT
 
 case "$#:${1:-}" in
   1:--check) MODE=CHECK ;;
@@ -207,6 +212,7 @@ if [[ "${BOOTSTRAP_ORCHESTRATOR_TEST_MODE:-}" == 1 ]]; then
     case "$test_override" in
       BOOTSTRAP_ORCHESTRATOR_TEST_MODE|\
       BOOTSTRAP_ORCHESTRATOR_TEST_STAGE_DIR|\
+      BOOTSTRAP_ORCHESTRATOR_TEST_HEARTBEAT_SECONDS|\
       BOOTSTRAP_ORCHESTRATOR_TEST_LOCK_FILE) ;;
       *) stop_orchestrator test-override-unapproved 10 ;;
     esac
@@ -228,6 +234,12 @@ if [[ "${BOOTSTRAP_ORCHESTRATOR_TEST_MODE:-}" == 1 ]]; then
       stop_orchestrator unsafe-lock-target 10
   fi
   flock_binary=flock
+  if [[ -n "${BOOTSTRAP_ORCHESTRATOR_TEST_HEARTBEAT_SECONDS:-}" ]]; then
+    # 值进了 sleep 与算术，必须先钉死形状，不能直接展开。
+    [[ "$BOOTSTRAP_ORCHESTRATOR_TEST_HEARTBEAT_SECONDS" =~ ^[1-9][0-9]{0,3}$ ]] ||
+      stop_orchestrator invalid-test-heartbeat 10
+    heartbeat_seconds=$BOOTSTRAP_ORCHESTRATOR_TEST_HEARTBEAT_SECONDS
+  fi
 else
   for test_override in "${!BOOTSTRAP_ORCHESTRATOR_TEST_@}"; do
     : "$test_override"
@@ -311,12 +323,40 @@ stage_is_mutating() {
 report_progress() {
   local stage=$1 operation=$2 phase=$3 result=$4
   if [[ "$phase" == begin ]]; then
+    stage_started=$SECONDS
     printf '[%s/%s] stage %s %s ...\n' \
       "$stage_index" "${#STAGES[@]}" "$stage" "$operation" >&2
     return
   fi
-  printf '[%s/%s] stage %s %s -> %s\n' \
-    "$stage_index" "${#STAGES[@]}" "$stage" "$operation" "$result" >&2
+  printf '[%s/%s] stage %s %s -> %s (%ss)\n' \
+    "$stage_index" "${#STAGES[@]}" "$stage" "$operation" "$result" \
+    "$(( SECONDS - stage_started ))" >&2
+}
+
+# stage 的输出是被 run_stage 整体捕获后再校验的，运行期间一个字节都不会流出来。
+# 装 kubernetes 这类 stage 要跑几分钟，期间终端全静默——运维分不清「在装」还是
+# 「卡死」。心跳是唯一能在不破坏「捕获后校验」契约的前提下给出存活信号的办法。
+# 每次一整行而不是原地刷新：日志要能 grep，进度条会毁掉这一点。
+start_progress_heartbeat() {
+  local stage=$1 operation=$2
+  (
+    elapsed=0
+    while :; do
+      /bin/sleep "$heartbeat_seconds"
+      elapsed=$(( elapsed + heartbeat_seconds ))
+      printf '[%s/%s] stage %s %s ... %ss elapsed\n' \
+        "$stage_index" "${#STAGES[@]}" "$stage" "$operation" "$elapsed" >&2
+    done
+  ) &
+  progress_heartbeat_pid=$!
+}
+
+# kill/wait 对已退出的子进程都会返回非零；这里全部吞掉，心跳的死活不能影响判定。
+stop_progress_heartbeat() {
+  [[ -n "$progress_heartbeat_pid" ]] || return 0
+  kill "$progress_heartbeat_pid" 2>/dev/null || :
+  wait "$progress_heartbeat_pid" 2>/dev/null || :
+  progress_heartbeat_pid=
 }
 
 record_stage_summary() {
@@ -471,12 +511,17 @@ if [[ "$MODE" == APPLY ]]; then
   acquire_lock "$lock_uid"
 fi
 
-stage_index=0
+# run_stage 内的 stop_orchestrator 会直接 exit，信号也可能在任意点打断；
+# 心跳进程不能因此变成孤儿。
+trap stop_progress_heartbeat EXIT
+
 for stage in "${STAGES[@]}"; do
   stage_index=$((stage_index + 1))
   report_progress "$stage" check begin ''
   rc=0
+  start_progress_heartbeat "$stage" check
   run_stage "$stage" check || rc=$?
+  stop_progress_heartbeat
   (( rc == 0 )) ||
     finish_orchestrator STOP_STAGE "stage-${stage}-check-stopped" "$rc" "$stage"
 
@@ -498,7 +543,9 @@ for stage in "${STAGES[@]}"; do
     stage_is_mutating "$stage" || stop_orchestrator invalid-stage-result 30
     report_progress "$stage" apply begin ''
     rc=0
+    start_progress_heartbeat "$stage" apply
     run_stage "$stage" apply || rc=$?
+    stop_progress_heartbeat
     (( rc == 0 )) ||
       finish_orchestrator STOP_STAGE "stage-${stage}-apply-stopped" "$rc" "$stage"
     apply_result_is_success "$stage" "$STAGE_RESULT" ||
@@ -508,7 +555,9 @@ for stage in "${STAGES[@]}"; do
 
     report_progress "$stage" postcheck begin ''
     rc=0
+    start_progress_heartbeat "$stage" postcheck
     run_stage "$stage" check || rc=$?
+    stop_progress_heartbeat
     (( rc == 0 )) ||
       finish_orchestrator STOP_STAGE "stage-${stage}-postcheck-stopped" "$rc" "$stage"
     [[ "$STAGE_RESULT" == ALREADY_COMPLIANT ]] ||

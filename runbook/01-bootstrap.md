@@ -61,6 +61,22 @@ scripts/bootstrap/run-approved.sh --apply
 `scripts/bootstrap/run-approved.sh <approved-sha> --check`，此时该 SHA 必须等于
 `origin/main`。
 
+**`origin/validated` 落后或不可用时，显式传 SHA 是正规路径而非例外。**
+`publish-validated` 只在 `validation-gate` 全绿后才推进该引用；门禁跑不起来时它会
+停在旧提交上，此时**不带 SHA 会静默部署旧版本**（入口只校验它在 `origin/main` 历史上，
+不校验它是不是最新）。
+
+截至 2026-08-21，`unif-code` 组织的 GitHub Actions 免费额度已用尽，私有仓所有 job 在
+2 秒内失败，`validation-gate` 与 `publish-validated` 均未运行，`origin/validated` 停在
+stage 目录迁移之前。因此当前一律显式传 SHA：
+
+```bash
+scripts/bootstrap/run-approved.sh <origin/main 的完整 40 位 SHA> --check
+```
+
+额度重置或开启 spending limit 后，`validation-gate` 恢复、`origin/validated` 重新推进，
+再回到不带 SHA 的默认路径。
+
 历史上手工粘贴的等价门禁脚本已由该入口取代：粘贴长脚本曾多次因终端丢字符导致
 `APPROVED_SHA` 截断或行断裂，也曾遗漏 `merge --ff-only`（`exit 97`）。
 
@@ -104,6 +120,38 @@ orchestrator，它必须依据各 stage 的检查结果跳过这些已完成 sta
 `20` 为供应链不匹配，`30` 为未知/漂移状态，`40` 为 APPLY 失败，`50` 为部署后
 验证失败。任何非零退出码都必须停止。
 
+### 编排器层的输出（2026-08-21 起）
+
+某个 stage 停止时，编排器自己也会给出一层结论，与 stage 的退出码**并存**：
+
+```
+RESULT=STOP_STAGE
+REASON=stage-60-check-stopped
+EXIT_CODE=30
+```
+
+`REASON` 形如 `stage-<NN>-{check,apply,postcheck}-stopped`，指出是哪个 stage 的哪一次
+调用停的。`EXIT_CODE` 原样沿用该 stage 自己的退出码，语义见上表。
+
+**停止时同样会输出已完成 stage 的完整摘要与尾块**：每个已通过 stage 的
+`STAGE_<NN>_RESULT`、`STAGE_<NN>_EVIDENCE`、`STAGE_<NN>_SHA256`，以及
+`PHASE=bootstrap-all` 起的尾块。回填要求与成功时一致——失败回执同样有完整证据可填，
+不再需要为了拿证据路径重跑一遍。
+
+> 2026-08-21 之前不是这样：编排器的失败分支因 `errexit` 在函数边界上泄漏而**从未执行**，
+> stage 一停就直接退出，00 到停止点之间的全部摘要与证据路径都被丢弃。
+
+进度行与心跳走 **stderr**，形如：
+
+```
+[5/8] stage 40 check ...
+[5/8] stage 40 check ... 5s elapsed
+[5/8] stage 40 check -> ALREADY_COMPLIANT (37s)
+```
+
+它们是给人看的存活信号，**不属于 stdout 的证据契约，不需要回填**。慢 stage 首拍
+5 秒内出现、之后每 15 秒一行；看到心跳就说明进程还活着，不是卡死。
+
 ## 排错：已知 STOP 与处置
 
 `--check`/`--apply` 的 STOP 一律 fail-closed，先看 `REASON=` 再对照下表。以下条目均为
@@ -120,6 +168,38 @@ orchestrator，它必须依据各 stage 的检查结果跳过这些已完成 sta
 | `partial-kubernetes-contract` | `/opt/cni/bin` 条目集或包 payload 不符 | 允许的集合只有「kubernetes-cni 包清单」或「包清单 + 锁定的 `cilium-cni`」；其他多余文件需人工核实来源 |
 | `control-plane-runtime-set-drift` | 4 个控制面容器未各恰好一个 Running 于 kube-system | 检查 `crictl ps`；装完 CNI 后额外的 cilium/coredns 容器属正常，已被容忍 |
 | `cilium-post-install-state-invalid` | helm 装完后 Cilium 工作负载在超时窗口内未就绪 | 脚本在装后有界轮询（默认 10 分钟）；仍超时说明 Pod 真的没起来，查 `kubectl -n kube-system get pods` |
+| `gateway-cilium-cluster-state-unknown` | Stage 60 的复合判定处于混合态：八个分量既非全部 COMPLIANT、也非全部 MISSING | **先读分量报告**，停止时会逐条打印（见下） |
+
+`gateway-cilium-cluster-state-unknown` 停止时输出的分量：
+
+```
+CLUSTER_STATE=UNKNOWN
+KUBE_PROXY_STATE=COMPLIANT
+HELM_BINARY_STATE=COMPLIANT
+GATEWAY_STATE=COMPLIANT
+HELM_SECRET_STATE=UNKNOWN      ← 阻塞点
+CILIUM_WORKLOAD_STATE=COMPLIANT
+ENVOY_DAEMONSET_STATE=COMPLIANT
+ENVOY_PODS_STATE=COMPLIANT
+CILIUM_CONFIG_STATE=COMPLIANT
+HELM_RELEASE_STATE=COMPLIANT
+```
+
+取值只有 `COMPLIANT`/`MISSING`/`UNKNOWN` 三种。注意 `KUBE_PROXY_STATE` 非 COMPLIANT 时
+其余分量**根本没被查询**，会统一显示 `UNKNOWN`——那是「没查」不是「查了不对」，
+先解决 kube-proxy 残留再重跑。
+
+> 2026-08-21 之前这八个分量在停止时一个都不打印，定位只能靠额外跑一轮只读普查。
+
+**外来 Helm release 不再判死。** Stage 60/90 的 helm 判定作用域已收窄为「我们的 cilium
+release 对不对」，集群里其他运维装的 release（例如 gitlab-runner）会被服务端
+`--selector owner=helm,name=cilium` 直接滤掉，不影响判定。仍然会被抓的是这三种：
+cilium 被 `helm upgrade` 过（留下 revision 2）、cilium 装在非 `kube-system`、
+存在同名的影子 release。
+
+各 stage 能发出的**完整** STOP 原因清单见 `scripts/bootstrap/stages/<NN-name>/README.md`
+——那些文件由源码生成并有 `StageReadmeTest` 防漂移。本表只收录实际遇到过、且处置方式
+不显然的条目。
 
 ### kubelet serving CSR 人工批准（运维动作）
 
